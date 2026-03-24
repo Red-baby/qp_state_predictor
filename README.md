@@ -120,6 +120,8 @@ qp_state_predictor/
     ├── datasets.py
     ├── models.py
     ├── preprocess_cache.py
+    ├── preprocess_pair_cache.py
+    ├── pair_cache.py
     ├── train.py
     └── eval.py
 ```
@@ -147,6 +149,19 @@ python -m qp_predictor.preprocess_cache --config my_config.yaml
 - 提取每帧 self features
 - 保存到 `cache_dir/*.npz`
 
+### Step 2b:（推荐）pair 特征 sidecar，加速 Phase 2 / Phase 3
+
+默认训练时会在 `__getitem__` 里对每条参考边在线调用 `extract_pair_features`（较慢）。  
+在已有 `<sequence>.npz`（含 `y_lowres`）的前提下，可**不重扫原始 YUV**，增量生成 sidecar：
+
+```bash
+python -m qp_predictor.preprocess_pair_cache --config my_config.yaml
+```
+
+- 写出 `cache_dir/<sequence>.pair.npz`：稀疏边表 `cur_pocs` / `ref_pocs` / `pair_feats`，并写入与配置一致的元数据（resize、pair_block_size、changed_threshold）。
+- 已存在时可加 `--force` 重写。
+- 然后在配置里设 `features.use_pair_cache: true`。若希望缺缓存直接报错（禁止静默回退慢路径），可设 `pair_cache_required: true` 且 `pair_cache_fallback_online: false`。
+
 ### Step 3: 训练
 
 #### Phase 1
@@ -163,6 +178,22 @@ python -m qp_predictor.train --config my_config.yaml --phase 2
 ```bash
 python -m qp_predictor.train --config my_config.yaml --phase 3
 ```
+
+#### 多卡训练（DDP，例如双卡）
+配置中 `batch_size_phase1/2/3` 表示**每张 GPU 上的 batch**；全局有效 batch 约为「每卡 batch × GPU 数」。
+
+```bash
+# 方式一：封装脚本（默认 2 卡，可改 NGPUS）
+./run_train_ddp.sh 1
+./run_train_ddp.sh 2
+./run_train_ddp.sh 3
+
+# 方式二：torchrun 直接调用
+torchrun --standalone --nproc_per_node=2 -m qp_predictor.train --config my_config.yaml --phase 1
+```
+
+预处理仍用单进程：`python -m qp_predictor.preprocess_cache --config my_config.yaml`。  
+一键流水线里若希望训练阶段用双卡，在**终端外层**执行（勿改脚本内部），例如：`nohup env TRAIN_GPUS=2 ./run_preprocess_then_train.sh > logs/nohup.log 2>&1 &`
 
 ### Step 4: 评估
 ```bash

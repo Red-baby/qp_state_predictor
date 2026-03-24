@@ -22,43 +22,56 @@ class MLP(nn.Module):
 
 
 class Phase1Net(nn.Module):
-    def __init__(self, self_dim: int, meta_dim: int, cfg: dict):
+    def __init__(self, self_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
         super().__init__()
         hid = int(cfg["model"]["head_hidden"])
         dropout = float(cfg["model"]["dropout"])
-        in_dim = self_dim + meta_dim + 1
+        self.pass1_dim = pass1_dim
+        in_dim = self_dim + meta_dim + 1 + pass1_dim
         self.net = MLP(in_dim, hid, 2, dropout=dropout, num_layers=3)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        x = torch.cat([batch["self_feats"], batch["meta_feats"], batch["qp"]], dim=-1)
+        parts = [batch["self_feats"], batch["meta_feats"], batch["qp"]]
+        if self.pass1_dim > 0 and "pass1_feats" in batch:
+            parts.append(batch["pass1_feats"])
+        x = torch.cat(parts, dim=-1)
         pred = self.net(x)
         return {"pred": pred}
 
 
 class Phase2Net(nn.Module):
-    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict):
+    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
         super().__init__()
         hid = int(cfg["model"]["head_hidden"])
         dropout = float(cfg["model"]["dropout"])
-        in_dim = self_dim + meta_dim + 1 + 2 * (self_dim + pair_dim + 1 + 1)
+        self.pass1_dim = pass1_dim
+        ref_single = self_dim + pair_dim + 1 + 1 + pass1_dim
+        in_dim = self_dim + meta_dim + 1 + pass1_dim + 2 * ref_single
         self.net = MLP(in_dim, hid, 2, dropout=dropout, num_layers=3)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         ref_valid = batch["ref_valid_mask"].unsqueeze(-1)
-        ref_pack = torch.cat([
+        ref_parts = [
             batch["ref_feats"],
             batch["pair_feats"],
             batch["ref_qps"],
             ref_valid,
-        ], dim=-1).reshape(batch["self_feats"].shape[0], -1)
+        ]
+        if self.pass1_dim > 0 and "ref_pass1_feats" in batch:
+            ref_parts.append(batch["ref_pass1_feats"])
+        ref_pack = torch.cat(ref_parts, dim=-1).reshape(batch["self_feats"].shape[0], -1)
 
-        x = torch.cat([batch["self_feats"], batch["meta_feats"], batch["qp"], ref_pack], dim=-1)
+        main_parts = [batch["self_feats"], batch["meta_feats"], batch["qp"]]
+        if self.pass1_dim > 0 and "pass1_feats" in batch:
+            main_parts.append(batch["pass1_feats"])
+        main_parts.append(ref_pack)
+        x = torch.cat(main_parts, dim=-1)
         pred = self.net(x)
         return {"pred": pred}
 
 
 class Phase3Net(nn.Module):
-    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict):
+    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
         super().__init__()
         self.state_dim = int(cfg["model"]["state_dim"])
         self.self_hidden = int(cfg["model"]["self_hidden"])
@@ -66,9 +79,10 @@ class Phase3Net(nn.Module):
         self.state_hidden = int(cfg["model"]["state_hidden"])
         self.head_hidden = int(cfg["model"]["head_hidden"])
         self.dropout = float(cfg["model"]["dropout"])
+        self.pass1_dim = pass1_dim
 
         self.self_encoder = MLP(
-            in_dim=self_dim + meta_dim + 1,
+            in_dim=self_dim + meta_dim + 1 + pass1_dim,
             hidden_dim=self.self_hidden,
             out_dim=self.self_hidden,
             dropout=self.dropout,
@@ -114,9 +128,19 @@ class Phase3Net(nn.Module):
         device = self_feats.device
 
         topo_order = batch["topo_order"]
+        if topo_order.dim() == 2 and topo_order.size(0) > 1:
+            first = topo_order[0 : 1].expand_as(topo_order)
+            if not torch.equal(topo_order, first):
+                raise RuntimeError(
+                    "Phase3 batch 内各样本的 topo_order 不一致；当前实现按 batch[0] 的拓扑递推，"
+                    "多序列 batch 会算错。请将 train.batch_size_phase3 设为 1，或保证各 segment 拓扑相同。"
+                )
         topo = topo_order[0] if topo_order.dim() == 2 else topo_order
 
-        u = self.self_encoder(torch.cat([self_feats, meta_feats, qps], dim=-1))
+        enc_parts = [self_feats, meta_feats, qps]
+        if self.pass1_dim > 0 and "pass1_feats" in batch:
+            enc_parts.append(batch["pass1_feats"])
+        u = self.self_encoder(torch.cat(enc_parts, dim=-1))
         z = torch.zeros(B, T, self.state_dim, device=device, dtype=u.dtype)
         pred = torch.zeros(B, T, 2, device=device, dtype=u.dtype)
         aux = torch.zeros(B, T, 2, device=device, dtype=u.dtype)

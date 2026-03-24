@@ -45,14 +45,15 @@ def build_default_local_template(i_interval: int = 125, gop_size: int = 16) -> p
     while anchor <= max_full_anchor:
         mapping[anchor] = {
             "frame_type": "P",
-            "temporal_layer": 0,
+            "temporal_layer": 1,
             "ref_local_1": prev_anchor,
             "ref_local_2": -1,
             "num_refs": 1,
             "valid_train": 1,
         }
         tmp = {}
-        _recursive_b_frames(prev_anchor, anchor, layer=1, out=tmp)
+        # I=0，P=1；B 从 2 起随递归加深递增（与原先 P=0、B 从 1 起相比整体 +1）
+        _recursive_b_frames(prev_anchor, anchor, layer=2, out=tmp)
         for k, v in tmp.items():
             v["valid_train"] = 1
             mapping[k] = v

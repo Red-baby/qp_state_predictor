@@ -94,6 +94,15 @@ def extract_self_features(img_u8: np.ndarray, block_size: int = 8, entropy_bins:
     return np.asarray(feats, dtype=np.float32)
 
 
+def pass1_feature_names() -> List[str]:
+    return [
+        "pass1_qp_norm",
+        "pass1_log_bits",
+        "pass1_log_mse",
+        "delta_qp_from_pass1",
+    ]
+
+
 def pair_feature_names() -> List[str]:
     return [
         "absdiff_mean", "absdiff_std", "absdiff_p90",

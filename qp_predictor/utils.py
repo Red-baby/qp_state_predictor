@@ -9,6 +9,19 @@ import numpy as np
 import torch
 
 
+def qp_norm_span(data_cfg: dict) -> float:
+    """QP 线性缩放到约 [0,1] 所用的区间长度 max(qp_norm_max - qp_norm_min, eps)。"""
+    lo = float(data_cfg.get("qp_norm_min", 30))
+    hi = float(data_cfg.get("qp_norm_max", 255))
+    return max(hi - lo, 1e-6)
+
+
+def normalize_qp(q: float | int, data_cfg: dict) -> float:
+    """将 QP 按 data.qp_norm_min / qp_norm_max 做 min-max 归一化（默认 30～255）。"""
+    lo = float(data_cfg.get("qp_norm_min", 30))
+    return (float(q) - lo) / qp_norm_span(data_cfg)
+
+
 def ensure_dir(path: str | Path) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -76,13 +89,26 @@ def train_val_test_split(items: List[str], train_ratio: float, val_ratio: float,
     rnd = random.Random(seed)
     rnd.shuffle(uniq)
     n = len(uniq)
+    if n == 0:
+        return [], [], []
+
     n_train = int(round(n * train_ratio))
     n_val = int(round(n * val_ratio))
-    n_train = min(n_train, n)
-    n_val = min(n_val, n - n_train)
+    n_test = n - n_train - n_val
+    n_train = max(0, min(n_train, n))
+    n_val = max(0, min(n_val, n - n_train))
+    n_test = n - n_train - n_val
+
     train_items = uniq[:n_train]
-    val_items = uniq[n_train:n_train + n_val]
-    test_items = uniq[n_train + n_val:]
+    val_items = uniq[n_train : n_train + n_val]
+    test_items = uniq[n_train + n_val :]
+
+    # round() 在序列数较少时常把 val/test 划成 0，导致验证集为空或指标无意义；在可能时补出非空划分
+    if n >= 2 and len(val_items) == 0 and len(train_items) > 1:
+        val_items = [train_items.pop()]
+    if n >= 3 and len(test_items) == 0 and len(train_items) > 1:
+        test_items = [train_items.pop()]
+
     return train_items, val_items, test_items
 
 

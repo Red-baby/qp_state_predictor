@@ -48,6 +48,19 @@ DEFAULT_CONFIG = {
         "train_ratio": 0.8,
         "val_ratio": 0.1,
         "test_ratio": 0.1,
+        # QP 输入与 pass1_delta_qp 分母：min-max 归一化区间 (x - min) / (max - min)
+        "qp_norm_min": 30,
+        "qp_norm_max": 255,
+        "use_pass1_features": False,
+        # 训练输出子目录名：phase{N} 后追加后缀，便于 pass1 开/关 对照实验（见 train.phase_output_dirname）
+        "output_phase_no_pass1_suffix": "",
+        "output_phase_pass1_suffix": "_pass1",
+        "pass1_columns": {
+            "qp": None,
+            "bits": None,
+            "mse": None,
+            "psnr": None,
+        },
     },
     "features": {
         "block_size": 8,
@@ -55,6 +68,11 @@ DEFAULT_CONFIG = {
         "edge_threshold": 0.08,
         "changed_threshold": 0.03,
         "pair_block_size": 8,
+        # Phase 2/3：sidecar `<seq>.pair.npz`（由 preprocess_pair_cache 生成）
+        "use_pair_cache": False,
+        "pair_cache_suffix": ".pair.npz",
+        "pair_cache_required": False,
+        "pair_cache_fallback_online": True,
     },
     "train": {
         "num_workers": 4,
@@ -69,6 +87,8 @@ DEFAULT_CONFIG = {
         "amp": True,
         "device": "cuda",
         "save_every": 1,
+        # 多卡 DDP（torchrun）：batch_size_phase* 为每卡 batch；见 README 或 run_train_ddp.sh
+        "ddp_find_unused_parameters": False,
     },
     "loss": {
         "bits_weight": 1.0,

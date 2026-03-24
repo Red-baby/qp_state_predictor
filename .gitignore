@@ -1,3 +1,7 @@
 _pdf_extract.txt
 __pycache__/
 *.pyc
+qp_state_predictor_cache/
+outputs/
+logs/
+dataset/

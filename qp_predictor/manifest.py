@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import List
 
+import numpy as np
 import pandas as pd
 
 from .graph import build_default_local_template
+from .utils import qp_norm_span
 
 
 def _validate_columns(df: pd.DataFrame, cols: List[str]) -> None:
@@ -118,5 +120,35 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
     df["psnr"] = df[psnr_col]
     df["mse"] = df[mse_col]
     df["valid_train"] = df["valid_train"].astype(int)
+
+    if data_cfg.get("use_pass1_features", False):
+        p1cols = data_cfg.get("pass1_columns", {})
+        p1_qp_col = p1cols.get("qp")
+        p1_bits_col = p1cols.get("bits")
+        p1_mse_col = p1cols.get("mse")
+        p1_psnr_col = p1cols.get("psnr")
+
+        needed = [c for c in (p1_qp_col, p1_bits_col, p1_mse_col) if c]
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"use_pass1_features=true 但 CSV 中缺少 pass1 列: {missing}。"
+                " 请检查 data.pass1_columns 配置与 labels_csv 是否一致。"
+            )
+
+        if p1_qp_col and p1_qp_col in df.columns:
+            df["pass1_qp"] = df[p1_qp_col].astype(float)
+        if p1_bits_col and p1_bits_col in df.columns:
+            df["pass1_bits"] = df[p1_bits_col].astype(float)
+        if p1_mse_col and p1_mse_col in df.columns:
+            df["pass1_mse"] = df[p1_mse_col].astype(float)
+        if p1_psnr_col and p1_psnr_col in df.columns:
+            df["pass1_psnr"] = df[p1_psnr_col].astype(float)
+
+        df["pass1_log_bits"] = np.log1p(df["pass1_bits"].values.astype(np.float64)).astype(np.float32)
+        df["pass1_log_mse"] = np.log(df["pass1_mse"].values.astype(np.float64) + 1e-6).astype(np.float32)
+        df["pass1_delta_qp"] = (
+            (df[qp_col].values - df["pass1_qp"].values) / qp_norm_span(data_cfg)
+        ).astype(np.float32)
 
     return df.sort_values(group_cols + [poc_col, "row_id"]).reset_index(drop=True)

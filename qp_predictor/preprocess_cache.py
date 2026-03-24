@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -64,7 +66,15 @@ def main():
             y_lowres[poc] = y_small
             self_features[poc] = feats.astype(np.float32)
 
-        np.savez_compressed(out_path, y_lowres=y_lowres, self_features=self_features)
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".npz", dir=str(cache_dir))
+        os.close(tmp_fd)
+        try:
+            np.savez_compressed(tmp_path, y_lowres=y_lowres, self_features=self_features)
+            os.replace(tmp_path, str(out_path))
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
         print(f"[saved] {out_path}")
 
 

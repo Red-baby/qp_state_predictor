@@ -1,10 +1,10 @@
 seed: 42
 
 data:
-  labels_csv: "/path/to/frame_labels.csv"
-  yuv_root: "/path/to/yuv_folder"
-  cache_dir: "/path/to/cache"
-  output_root: "/path/to/outputs"
+  labels_csv: "/data/lh/qp_state_predictor/dataset/vca_rc_merged_with_pass1.csv"
+  yuv_root: "/mnt/ec-data2/lh_data/vtcoder_yuv/720p/"
+  cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_cache/"
+  output_root: "/data/lh/qp_state_predictor/outputs/"
 
   sequence_col: "sequence"
   poc_col: "poc"
@@ -40,20 +40,19 @@ data:
   val_ratio: 0.1
   test_ratio: 0.1
 
-  # 当前帧/参考帧 QP 与 pass1_qp 的 min-max 归一化：(x - min) / (max - min)，默认约 30～255
+  # 当前帧/参考帧 QP 与 pass1_qp 的 min-max 归一化：(x - min) / (max - min)，与数据范围一致
   qp_norm_min: 30
   qp_norm_max: 255
 
-  # pass1 先验特征（来自 CSV，不来自 YUV）
-  use_pass1_features: false
+  # pass1 先验特征（来自 CSV）；启用后模型输入多 4 维 pass1 向量
+  use_pass1_features: true
   pass1_columns:
     qp: "pass1_qp"
     bits: "pass1_bits"
     mse: "pass1_mse"
     psnr: "pass1_psnr"
 
-  # 训练输出目录 = output_root / (phase{N} + 后缀)；便于 pass1 开/关 对照
-  # use_pass1_features=false 时默认 phase1；true 时默认 phase1_pass1
+  # 输出目录 = output_root / phase{N}{suffix}；关 pass1 为 phase1，开 pass1 为 phase1_pass1（可改后缀）
   output_phase_no_pass1_suffix: ""
   output_phase_pass1_suffix: "_pass1"
 
@@ -63,18 +62,21 @@ features:
   edge_threshold: 0.08
   changed_threshold: 0.03
   pair_block_size: 8
-  # Phase 2/3：先运行 python -m qp_predictor.preprocess_pair_cache --config ... 生成 <seq>.pair.npz 后再设 true
-  use_pair_cache: false
+  # Phase 2/3：生成 pair sidecar 后设为 true（见 README preprocess_pair_cache）
+  use_pair_cache: true
   pair_cache_suffix: ".pair.npz"
   pair_cache_required: false
   pair_cache_fallback_online: true
 
 train:
-  num_workers: 4
-  epochs: 40
-  batch_size_phase1: 256
-  batch_size_phase2: 256
-  batch_size_phase3: 8
+  num_workers: 64
+  # DataLoader 预取（仅 num_workers>0 生效）；远端盘慢时可试 6～8
+  prefetch_factor: 8
+  epochs: 60
+  # 单卡：即为该卡 batch。双卡 DDP（torchrun）：为每卡 batch，全局 batch ≈ 该值 × GPU 数
+  batch_size_phase1: 512
+  batch_size_phase2: 2048
+  batch_size_phase3: 128
   lr: 1.0e-3
   weight_decay: 1.0e-5
   huber_delta: 0.2
@@ -82,6 +84,8 @@ train:
   amp: true
   device: "cuda"
   save_every: 1
+  # DDP 专用（一般保持 false；仅当某阶段报 unused parameter 再改为 true）
+  ddp_find_unused_parameters: false
 
 loss:
   bits_weight: 1.0
