@@ -119,6 +119,7 @@ model:
   mode: "double"
   # mode=double 时：bits → 仅训码率；distortion → 仅训失真（psnr→_double_psnr，log_mse→_double_mse，vmaf→_double_vmaf）
   double_target: "bits"
+  phase2_variant: "phase2_1"
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64
