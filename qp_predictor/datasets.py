@@ -43,14 +43,15 @@ class CacheManager:
 
 
 def build_meta_vector(row: pd.Series, i_interval: int) -> np.ndarray:
+    segment_span = int(row["segment_span"]) if "segment_span" in row and int(row["segment_span"]) > 0 else int(i_interval)
     frame_oh = frame_type_onehot(str(row["frame_type"]))
     tl = float(row["temporal_layer"]) if int(row["temporal_layer"]) >= 0 else -1.0
     num_refs = float(row["num_refs"])
-    local_poc = float(row["local_poc"]) / max(i_interval - 1, 1)
-    d_prev_i = float(row["distance_to_prev_I"]) / max(i_interval, 1)
-    d_next_i = float(row["distance_to_next_I"]) / max(i_interval, 1)
-    ref_d1 = float(row["ref_distance_1"]) / max(i_interval, 1) if int(row["ref_distance_1"]) >= 0 else -1.0
-    ref_d2 = float(row["ref_distance_2"]) / max(i_interval, 1) if int(row["ref_distance_2"]) >= 0 else -1.0
+    local_poc = float(row["local_poc"]) / max(segment_span - 1, 1)
+    d_prev_i = float(row["distance_to_prev_I"]) / max(segment_span, 1)
+    d_next_i = float(row["distance_to_next_I"]) / max(segment_span, 1)
+    ref_d1 = float(row["ref_distance_1"]) / max(segment_span, 1) if int(row["ref_distance_1"]) >= 0 else -1.0
+    ref_d2 = float(row["ref_distance_2"]) / max(segment_span, 1) if int(row["ref_distance_2"]) >= 0 else -1.0
     is_first = float(row["is_first_after_I"])
     vec = np.concatenate([
         frame_oh,

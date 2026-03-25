@@ -175,9 +175,9 @@ def split_manifest(manifest, cfg):
         cfg["seed"],
     )
     train_df = manifest[manifest[split_by_col].isin(train_keys)].reset_index(drop=True)
-    val_df = manifest[manifest[split_by_col].isin(val_keys)].reset_index(drop=True)
-    test_df = manifest[manifest[split_by_col].isin(test_keys)].reset_index(drop=True)
-    return train_df, val_df, test_df
+    eval_keys = list(dict.fromkeys(list(val_keys) + list(test_keys)))
+    eval_df = manifest[manifest[split_by_col].isin(eval_keys)].reset_index(drop=True)
+    return train_df, eval_df
 
 
 def build_model(cfg: dict, phase: int):
@@ -238,15 +238,14 @@ def make_dataloaders(
     rank: int = 0,
     world_size: int = 1,
 ):
-    train_df, val_df, test_df = split_manifest(manifest, cfg)
+    train_df, eval_df = split_manifest(manifest, cfg)
     data_cfg = cfg["data"]
     train_cfg = cfg["train"]
     dl_kw = _dataloader_common_kwargs(train_cfg)
 
     if phase in (1, 2):
         train_ds = FrameDataset(manifest, cfg, train_df, phase=phase)
-        val_ds = FrameDataset(manifest, cfg, val_df, phase=phase)
-        test_ds = FrameDataset(manifest, cfg, test_df, phase=phase)
+        eval_ds = FrameDataset(manifest, cfg, eval_df, phase=phase)
         batch_size = int(train_cfg[f"batch_size_phase{phase}"])
         train_sampler = (
             DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
@@ -260,24 +259,17 @@ def make_dataloaders(
             sampler=train_sampler,
             **dl_kw,
         )
-        val_loader = DataLoader(
-            val_ds,
+        eval_loader = DataLoader(
+            eval_ds,
             batch_size=batch_size,
             shuffle=False,
             **dl_kw,
         )
-        test_loader = DataLoader(
-            test_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            **dl_kw,
-        )
-        return train_loader, val_loader, test_loader
+        return train_loader, eval_loader
 
     if phase == 3:
         train_ds = SegmentDataset(manifest, cfg, train_df)
-        val_ds = SegmentDataset(manifest, cfg, val_df)
-        test_ds = SegmentDataset(manifest, cfg, test_df)
+        eval_ds = SegmentDataset(manifest, cfg, eval_df)
         batch_size = int(train_cfg["batch_size_phase3"])
         train_sampler = (
             DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=True)
@@ -291,19 +283,13 @@ def make_dataloaders(
             sampler=train_sampler,
             **dl_kw,
         )
-        val_loader = DataLoader(
-            val_ds,
+        eval_loader = DataLoader(
+            eval_ds,
             batch_size=batch_size,
             shuffle=False,
             **dl_kw,
         )
-        test_loader = DataLoader(
-            test_ds,
-            batch_size=batch_size,
-            shuffle=False,
-            **dl_kw,
-        )
-        return train_loader, val_loader, test_loader
+        return train_loader, eval_loader
 
     raise ValueError(f"Unsupported phase: {phase}")
 
@@ -1238,12 +1224,12 @@ def format_eval_metrics_block(name: str, metrics: dict) -> str:
     return "\n".join(lines)
 
 
-def print_epoch_metrics(train_log: dict, train_metrics: dict, val_metrics: dict) -> None:
-    """终端打印：优化 loss + 训练集 eval 指标 + val。"""
+def print_epoch_metrics(train_log: dict, train_metrics: dict, eval_metrics: dict) -> None:
+    """终端打印：优化 loss + 训练集 eval 指标 + eval。"""
     opt = train_log.get("loss", float("nan"))
     print(f"  [train]  opt_loss = {opt:.6f}")
     print(format_eval_metrics_block("train (eval)", train_metrics))
-    print(format_eval_metrics_block("val", val_metrics))
+    print(format_eval_metrics_block("eval", eval_metrics))
     print("  (完整指标仍写入 history.json)")
 
 
@@ -1394,7 +1380,7 @@ def main():
     parser.add_argument(
         "--metrics-json",
         action="store_true",
-        help="每个 epoch 仍打印 train/val/test 的完整 JSON（调试）；默认使用紧凑表格。",
+        help="每个 epoch 仍打印 train/eval 的完整 JSON（调试）；默认使用紧凑表格。",
     )
     args = parser.parse_args()
 
@@ -1434,7 +1420,7 @@ def main():
         device = torch.device(cfg["train"]["device"] if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    train_loader, val_loader, test_loader = make_dataloaders(
+    train_loader, eval_loader = make_dataloaders(
         manifest,
         cfg,
         args.phase,
@@ -1446,9 +1432,9 @@ def main():
     if len(train_loader.dataset) == 0:
         raise RuntimeError("训练集样本数为 0：请检查 labels_csv、valid_train 与划分。")
     n_split_units = manifest[cfg["data"]["split_by_col"]].nunique()
-    if len(val_loader.dataset) == 0 and n_split_units >= 2:
+    if len(eval_loader.dataset) == 0 and n_split_units >= 2:
         raise RuntimeError(
-            "验证集样本数为 0，但划分单位>=2：请调整 data.train_ratio/val_ratio/test_ratio，或检查 split_by_col。"
+            "eval 集样本数为 0，但划分单位>=2：请调整 data.train_ratio/val_ratio/test_ratio，或检查 split_by_col。"
         )
 
     if use_ddp:
@@ -1492,8 +1478,8 @@ def main():
         cleanup_distributed(use_ddp)
         return
 
-    best_val = float("inf")
-    history = {"train": [], "val": [], "test_best": None}
+    best_eval = float("inf")
+    history = {"train": [], "eval": []}
 
     for epoch in range(1, int(cfg["train"]["epochs"]) + 1):
         if use_ddp:
@@ -1519,15 +1505,15 @@ def main():
                 train_metrics = train_metrics_stub_when_skip_full_train_eval(cfg, train_log)
                 print(
                     "  [train] 已跳过全训练集 eval（train.eval_full_train_each_epoch=false），"
-                    "仅记录 opt_loss；val/test 仍为完整 eval。"
+                    "仅记录 opt_loss；eval 仍为完整评估。"
                 )
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-            val_metrics = evaluate_loader(eval_model, val_loader, device, cfg, args.phase, rank=rank)
+            eval_metrics = evaluate_loader(eval_model, eval_loader, device, cfg, args.phase, rank=rank)
         else:
             train_metrics = None
-            val_metrics = None
+            eval_metrics = None
 
         # 非 rank0 先到达 barrier；rank0 跑完整集 eval 后再汇合，避免同步顺序死锁
         if use_ddp:
@@ -1535,7 +1521,7 @@ def main():
 
         if rank == 0:
             history["train"].append({"epoch": epoch, "opt_loss": train_log["loss"], **train_metrics})
-            history["val"].append({"epoch": epoch, **val_metrics})
+            history["eval"].append({"epoch": epoch, **eval_metrics})
 
             if args.metrics_json:
                 print(
@@ -1546,10 +1532,10 @@ def main():
                         ensure_ascii=False,
                     ),
                 )
-                print("val:", json.dumps(val_metrics, indent=2, ensure_ascii=False))
+                print("eval:", json.dumps(eval_metrics, indent=2, ensure_ascii=False))
                 print("  (完整指标仍写入 history.json)")
             else:
-                print_epoch_metrics(train_log, train_metrics, val_metrics)
+                print_epoch_metrics(train_log, train_metrics, eval_metrics)
 
             ckpt = {
                 "epoch": epoch,
@@ -1560,15 +1546,9 @@ def main():
             }
             torch.save(ckpt, output_dir / "last.pt")
 
-            if val_metrics["loss"] < best_val:
-                best_val = val_metrics["loss"]
+            if eval_metrics["loss"] < best_eval:
+                best_eval = eval_metrics["loss"]
                 torch.save(ckpt, output_dir / "best.pt")
-                test_metrics = evaluate_loader(eval_model, test_loader, device, cfg, args.phase, rank=rank)
-                history["test_best"] = {"epoch": epoch, **test_metrics}
-                if args.metrics_json:
-                    print("test(best):", json.dumps(test_metrics, indent=2, ensure_ascii=False))
-                else:
-                    print(format_eval_metrics_block("test (best val)", test_metrics))
 
             save_json(history, output_dir / "history.json")
 
@@ -1576,7 +1556,7 @@ def main():
             dist.barrier()
 
     if rank == 0:
-        print(f"\nTraining done. Best val loss = {best_val:.6f}")
+        print(f"\nTraining done. Best eval loss = {best_eval:.6f}")
 
     cleanup_distributed(use_ddp)
 

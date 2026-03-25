@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
         "resize_height": 108,
         "i_interval": 125,
         "gop_size": 16,
+        "tail_hier_min": 4,
         "infer_refs_if_missing": True,
         "explicit_ref_columns": {
             "frame_type": None,

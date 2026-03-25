@@ -6,6 +6,24 @@ from typing import Dict, List, Tuple
 import pandas as pd
 
 
+def _make_record(
+    frame_type: str,
+    temporal_layer: int,
+    ref_local_1: int,
+    ref_local_2: int,
+    num_refs: int,
+    valid_train: int = 1,
+) -> dict:
+    return {
+        "frame_type": frame_type,
+        "temporal_layer": int(temporal_layer),
+        "ref_local_1": int(ref_local_1),
+        "ref_local_2": int(ref_local_2),
+        "num_refs": int(num_refs),
+        "valid_train": int(valid_train),
+    }
+
+
 def _recursive_b_frames(left: int, right: int, layer: int, out: dict):
     if right - left <= 1:
         return
@@ -23,59 +41,121 @@ def _recursive_b_frames(left: int, right: int, layer: int, out: dict):
     _recursive_b_frames(mid, right, layer + 1, out)
 
 
-def build_default_local_template(i_interval: int = 125, gop_size: int = 16) -> pd.DataFrame:
-    records = []
-    mapping = {
-        0: {
-            "frame_type": "I",
-            "temporal_layer": 0,
-            "ref_local_1": -1,
-            "ref_local_2": -1,
-            "num_refs": 0,
-            "valid_train": 1,
-        }
-    }
+def _build_full_gop(mapping: dict, left: int, right: int) -> None:
+    mapping[right] = _make_record("P", 1, left, -1, 1, valid_train=1)
+    tmp = {}
+    _recursive_b_frames(left, right, layer=2, out=tmp)
+    for local_poc, rec in tmp.items():
+        rec["valid_train"] = 1
+        mapping[local_poc] = rec
 
-    max_full_anchor = (i_interval // gop_size) * gop_size
-    if max_full_anchor == i_interval:
-        max_full_anchor -= gop_size
+
+def _recursive_tail_layers(left: int, right: int, layer: int, out: dict, leaf_layer: int) -> None:
+    if right - left < 4:
+        for local_poc in range(left + 1, right):
+            out[local_poc] = int(leaf_layer)
+        return
+    mid = (left + right) // 2
+    if mid == left or mid == right:
+        for local_poc in range(left + 1, right):
+            out[local_poc] = int(leaf_layer)
+        return
+    out[mid] = int(layer)
+    _recursive_tail_layers(left, mid, layer + 1, out, leaf_layer)
+    _recursive_tail_layers(mid, right, layer + 1, out, leaf_layer)
+
+
+def _fill_tail_refs_from_layers(mapping: dict, left_anchor: int, right_anchor: int) -> None:
+    for local_poc in range(left_anchor + 1, right_anchor):
+        cur = mapping.get(local_poc)
+        if not cur or cur["frame_type"] != "B":
+            continue
+        cur_layer = int(cur["temporal_layer"])
+        ref_local_1 = -1
+        ref_local_2 = -1
+        for cand in range(local_poc - 1, left_anchor - 1, -1):
+            if int(mapping[cand]["temporal_layer"]) < cur_layer:
+                ref_local_1 = cand
+                break
+        for cand in range(local_poc + 1, right_anchor + 1):
+            if int(mapping[cand]["temporal_layer"]) < cur_layer:
+                ref_local_2 = cand
+                break
+        if ref_local_1 < 0 or ref_local_2 < 0:
+            raise RuntimeError(
+                f"Failed to build tail references for local_poc={local_poc} "
+                f"in shortened GOP [{left_anchor}, {right_anchor}]."
+            )
+        cur["ref_local_1"] = ref_local_1
+        cur["ref_local_2"] = ref_local_2
+        cur["num_refs"] = 2
+
+
+def _build_tail_p_chain(mapping: dict, left_anchor: int, right_anchor: int) -> None:
+    prev = left_anchor
+    for local_poc in range(left_anchor + 1, right_anchor + 1):
+        mapping[local_poc] = _make_record("P", 1, prev, -1, 1, valid_train=1)
+        prev = local_poc
+
+
+def _build_tail_hier_gop(mapping: dict, left_anchor: int, right_anchor: int, leaf_layer: int) -> None:
+    mapping[right_anchor] = _make_record("P", 1, left_anchor, -1, 1, valid_train=1)
+    layers: dict[int, int] = {}
+    _recursive_tail_layers(left_anchor, right_anchor, layer=2, out=layers, leaf_layer=leaf_layer)
+    for local_poc, temporal_layer in layers.items():
+        mapping[local_poc] = _make_record("B", temporal_layer, -1, -1, 0, valid_train=1)
+    _fill_tail_refs_from_layers(mapping, left_anchor, right_anchor)
+
+
+def build_segment_local_template(
+    last_local_poc: int,
+    i_interval: int = 125,
+    gop_size: int = 16,
+    tail_hier_min: int = 4,
+    tail_leaf_layer: int = 5,
+) -> pd.DataFrame:
+    if last_local_poc < 0:
+        raise ValueError(f"last_local_poc must be >= 0, got {last_local_poc}")
+    if last_local_poc >= i_interval:
+        raise ValueError(f"last_local_poc must be < i_interval ({i_interval}), got {last_local_poc}")
+
+    mapping = {0: _make_record("I", 0, -1, -1, 0, valid_train=1)}
+    last_full_anchor = (last_local_poc // gop_size) * gop_size
 
     prev_anchor = 0
-    anchor = gop_size
-    while anchor <= max_full_anchor:
-        mapping[anchor] = {
-            "frame_type": "P",
-            "temporal_layer": 1,
-            "ref_local_1": prev_anchor,
-            "ref_local_2": -1,
-            "num_refs": 1,
-            "valid_train": 1,
-        }
-        tmp = {}
-        # I=0，P=1；B 从 2 起随递归加深递增（与原先 P=0、B 从 1 起相比整体 +1）
-        _recursive_b_frames(prev_anchor, anchor, layer=2, out=tmp)
-        for k, v in tmp.items():
-            v["valid_train"] = 1
-            mapping[k] = v
+    for anchor in range(gop_size, last_full_anchor + 1, gop_size):
+        _build_full_gop(mapping, prev_anchor, anchor)
         prev_anchor = anchor
-        anchor += gop_size
 
-    for lpoc in range(1, i_interval):
-        if lpoc not in mapping:
-            mapping[lpoc] = {
-                "frame_type": "B",
-                "temporal_layer": -1,
-                "ref_local_1": -1,
-                "ref_local_2": -1,
-                "num_refs": 0,
-                "valid_train": 0,
-            }
+    if last_full_anchor < last_local_poc:
+        tail_len = int(last_local_poc - last_full_anchor)
+        if tail_len < max(int(tail_hier_min), 2):
+            _build_tail_p_chain(mapping, last_full_anchor, last_local_poc)
+        else:
+            _build_tail_hier_gop(mapping, last_full_anchor, last_local_poc, leaf_layer=tail_leaf_layer)
 
-    for lpoc in range(i_interval):
-        r = mapping[lpoc]
-        records.append({"local_poc": lpoc, **r})
-    df = pd.DataFrame(records).sort_values("local_poc").reset_index(drop=True)
-    return df
+    records = []
+    for local_poc in range(last_local_poc + 1):
+        rec = mapping.get(local_poc)
+        if rec is None:
+            rec = _make_record("B", -1, -1, -1, 0, valid_train=0)
+        records.append({"local_poc": local_poc, **rec})
+    return pd.DataFrame(records).sort_values("local_poc").reset_index(drop=True)
+
+
+def build_default_local_template(
+    i_interval: int = 125,
+    gop_size: int = 16,
+    tail_hier_min: int = 4,
+    tail_leaf_layer: int = 5,
+) -> pd.DataFrame:
+    return build_segment_local_template(
+        last_local_poc=int(i_interval) - 1,
+        i_interval=i_interval,
+        gop_size=gop_size,
+        tail_hier_min=tail_hier_min,
+        tail_leaf_layer=tail_leaf_layer,
+    )
 
 
 def build_topo_order(nodes: List[int], refs: Dict[int, List[int]]) -> List[int]:
@@ -138,5 +218,11 @@ def build_segment_topo_order(segment_df: pd.DataFrame, i_interval: int) -> List[
                 refs[local_poc].append(ref_local)
 
     topo = build_topo_order(nodes, refs) if nodes else []
-    missing_nodes = [node for node in range(int(i_interval)) if node not in refs]
+    if "segment_last_local" in segment_df.columns and not segment_df.empty:
+        max_local = int(segment_df["segment_last_local"].max())
+    elif not segment_df.empty:
+        max_local = int(segment_df["local_poc"].max())
+    else:
+        max_local = int(i_interval) - 1
+    missing_nodes = [node for node in range(max_local + 1) if node not in refs]
     return topo + missing_nodes
