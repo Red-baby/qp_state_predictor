@@ -142,6 +142,12 @@ def compute_psnr_from_mse(mse, max_value: float = 255.0):
     return 10.0 * np.log10((max_value ** 2) / mse)
 
 
+def compute_psnr_from_mse_torch(mse: torch.Tensor, max_value: float = 255.0) -> torch.Tensor:
+    """与 ``compute_psnr_from_mse`` 一致，供训练图中反传使用。"""
+    mse = mse.clamp(min=1e-8)
+    return 10.0 * torch.log10((max_value ** 2) / mse)
+
+
 def inverse_log_bits(x):
     if isinstance(x, torch.Tensor):
         return torch.exp(x) - 1.0

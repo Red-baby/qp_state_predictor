@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -94,7 +94,19 @@ def extract_self_features(img_u8: np.ndarray, block_size: int = 8, entropy_bins:
     return np.asarray(feats, dtype=np.float32)
 
 
-def pass1_feature_names() -> List[str]:
+def pass1_feature_names(cfg: Optional[dict] = None) -> List[str]:
+    """
+    4 维 pass1 先验；loss.mse_term=vmaf 时第 3 维为 pass1 VMAF（归一化），否则为 pass1_log_mse。
+    """
+    if cfg is not None:
+        term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
+        if term == "vmaf":
+            return [
+                "pass1_qp_norm",
+                "pass1_log_bits",
+                "pass1_vmaf_norm",
+                "delta_qp_from_pass1",
+            ]
     return [
         "pass1_qp_norm",
         "pass1_log_bits",

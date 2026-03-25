@@ -68,14 +68,18 @@ def build_meta_vector(row: pd.Series, i_interval: int) -> np.ndarray:
     return vec.astype(np.float32)
 
 
-def build_pass1_vector(row: pd.Series, data_cfg: dict) -> np.ndarray:
-    """从 manifest 行构建 4 维 pass1 特征向量（qp 已按 data.qp_norm_min/max min-max）。"""
-    return np.asarray([
-        normalize_qp(float(row["pass1_qp"]), data_cfg),
-        float(row["pass1_log_bits"]),
-        float(row["pass1_log_mse"]),
-        float(row["pass1_delta_qp"]),
-    ], dtype=np.float32)
+def build_pass1_vector(row: pd.Series, cfg: dict) -> np.ndarray:
+    """从 manifest 行构建 4 维 pass1 先验：mse_term=vmaf 时第 3 维为 pass1_vmaf（除以 pass1_vmaf_norm_div），否则为 pass1_log_mse。"""
+    data_cfg = cfg["data"]
+    mse_term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
+    qp_n = normalize_qp(float(row["pass1_qp"]), data_cfg)
+    log_bits = float(row["pass1_log_bits"])
+    dqp = float(row["pass1_delta_qp"])
+    if mse_term == "vmaf":
+        div = float(data_cfg.get("pass1_vmaf_norm_div", 100.0))
+        v = float(row["pass1_vmaf"]) / max(div, 1e-6)
+        return np.asarray([qp_n, log_bits, v, dqp], dtype=np.float32)
+    return np.asarray([qp_n, log_bits, float(row["pass1_log_mse"]), dqp], dtype=np.float32)
 
 
 class FrameDataset(Dataset):
@@ -99,7 +103,7 @@ class FrameDataset(Dataset):
             self._qp_lookup[(str(r["segment_uid"]), int(r["poc"]))] = float(r["qp"])
 
         self._use_pass1 = bool(cfg["data"].get("use_pass1_features", False))
-        self._pass1_dim = len(pass1_feature_names()) if self._use_pass1 else 0
+        self._pass1_dim = len(pass1_feature_names(cfg)) if self._use_pass1 else 0
 
         self._row_lookup = {}
         if self.phase == 2 and self._use_pass1:
@@ -153,7 +157,11 @@ class FrameDataset(Dataset):
         qp = np.asarray([normalize_qp(float(row["qp"]), self.cfg["data"])], dtype=np.float32)
 
         target_bits = np.log1p(float(row["bits"]))
-        target_mse = np.log(float(row["mse"]) + 1e-6)
+        mse_term = str(self.cfg["loss"].get("mse_term", "log_mse")).lower().strip()
+        if mse_term == "vmaf":
+            target_mse = float(row["vmaf"])
+        else:
+            target_mse = np.log(float(row["mse"]) + 1e-6)
         target = np.asarray([target_bits, target_mse], dtype=np.float32)
 
         out = {
@@ -169,7 +177,7 @@ class FrameDataset(Dataset):
         }
 
         if self._use_pass1:
-            out["pass1_feats"] = torch.from_numpy(build_pass1_vector(row, self.cfg["data"]))
+            out["pass1_feats"] = torch.from_numpy(build_pass1_vector(row, self.cfg))
 
         if self.phase == 2:
             pair_feats_all = []
@@ -208,7 +216,7 @@ class FrameDataset(Dataset):
                     if self._use_pass1:
                         ref_row = self._row_lookup.get((seg_uid, ref_poc))
                         ref_p1 = (
-                            build_pass1_vector(ref_row, self.cfg["data"])
+                            build_pass1_vector(ref_row, self.cfg)
                             if ref_row is not None
                             else np.zeros(self._pass1_dim, dtype=np.float32)
                         )
@@ -253,7 +261,7 @@ class SegmentDataset(Dataset):
         self._pair_dim = len(pair_feature_names())
 
         self._use_pass1 = bool(cfg["data"].get("use_pass1_features", False))
-        self._pass1_dim = len(pass1_feature_names()) if self._use_pass1 else 0
+        self._pass1_dim = len(pass1_feature_names(cfg)) if self._use_pass1 else 0
 
         feat_cfg = cfg["features"]
         self._use_pair_cache = bool(feat_cfg.get("use_pair_cache", False))
@@ -303,12 +311,16 @@ class SegmentDataset(Dataset):
             meta_feats[t] = build_meta_vector(row, self.i_interval)
             qps[t, 0] = normalize_qp(float(row["qp"]), self.cfg["data"])
             targets[t, 0] = np.log1p(float(row["bits"]))
-            targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
+            mse_term = str(self.cfg["loss"].get("mse_term", "log_mse")).lower().strip()
+            if mse_term == "vmaf":
+                targets[t, 1] = float(row["vmaf"])
+            else:
+                targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
             valid_loss_mask[t] = float(row["valid_train"])
             frame_type_ids[t] = int(np.argmax(meta_feats[t, :4]))
             temporal_layers[t] = int(row["temporal_layer"])
             if self._use_pass1:
-                pass1_feats[t] = build_pass1_vector(row, self.cfg["data"])
+                pass1_feats[t] = build_pass1_vector(row, self.cfg)
 
         local_to_poc = {int(r["local_poc"]): int(r["poc"]) for _, r in g.iterrows()}
         poc_to_local = {v: k for k, v in local_to_poc.items()}

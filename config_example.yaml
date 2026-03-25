@@ -52,8 +52,7 @@ data:
     mse: "pass1_mse"
     psnr: "pass1_psnr"
 
-  # 训练输出目录 = output_root / (phase{N} + 后缀)；便于 pass1 开/关 对照
-  # use_pass1_features=false 时默认 phase1；true 时默认 phase1_pass1
+  # 训练输出目录 = output_root / (phase{N} + 后缀)；single 时另追加 _logmse/_psnr；double 时追加 _double_bits/_double_psnr/_double_mse（见 model.mode）
   output_phase_no_pass1_suffix: ""
   output_phase_pass1_suffix: "_pass1"
 
@@ -87,8 +86,17 @@ loss:
   bits_weight: 1.0
   mse_weight: 1.0
   aux_weight: 0.3
+  # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber；delta 自动 = train.huber_delta * huber_delta_psnr_scale，默认×5）
+  # 可选：huber_delta_psnr 指定绝对 dB 阈值；不设则用 scale
+  mse_term: "log_mse"
+  huber_delta_psnr: null
+  huber_delta_psnr_scale: 5.0
 
+# 训练：python -m qp_predictor.train --config ... --phase 1 --model-mode single --mse-term psnr
+# 或环境变量 QP_TRAIN_MODEL_MODE / QP_TRAIN_DOUBLE_TARGET / QP_TRAIN_MSE_TERM
 model:
+  mode: "single"
+  double_target: "bits"
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import yaml
 
 
@@ -51,8 +52,10 @@ DEFAULT_CONFIG = {
         # QP 输入与 pass1_delta_qp 分母：min-max 归一化区间 (x - min) / (max - min)
         "qp_norm_min": 30,
         "qp_norm_max": 255,
+        # loss.mse_term=vmaf 时必填：CSV 中 VMAF 标签列名（如 pass2_vmaf）
+        "vmaf_col": None,
         "use_pass1_features": False,
-        # 训练输出子目录名：phase{N} 后追加后缀，便于 pass1 开/关 对照实验（见 train.phase_output_dirname）
+        # 训练输出：phase{N} + 下列后缀 + 由 loss.mse_term 自动追加 _logmse 或 _psnr（见 train.phase_output_dirname）
         "output_phase_no_pass1_suffix": "",
         "output_phase_pass1_suffix": "_pass1",
         "pass1_columns": {
@@ -60,7 +63,11 @@ DEFAULT_CONFIG = {
             "bits": None,
             "mse": None,
             "psnr": None,
+            # loss.mse_term=vmaf 时作为 pass1 向量第 3 维（默认列名 pass1_vmaf）
+            "vmaf": None,
         },
+        # pass1 VMAF 输入归一化：pass1_vmaf / pass1_vmaf_norm_div（与 qp 归一化同量级）
+        "pass1_vmaf_norm_div": 100.0,
     },
     "features": {
         "block_size": 8,
@@ -87,6 +94,8 @@ DEFAULT_CONFIG = {
         "amp": True,
         "device": "cuda",
         "save_every": 1,
+        # 每 epoch 是否在训练集上跑完整 eval（与 val 一样扫全数据）；false 可明显省内存/时间，history 中 train 仅保留 opt_loss 占位
+        "eval_full_train_each_epoch": True,
         # 多卡 DDP（torchrun）：batch_size_phase* 为每卡 batch；见 README 或 run_train_ddp.sh
         "ddp_find_unused_parameters": False,
     },
@@ -94,8 +103,20 @@ DEFAULT_CONFIG = {
         "bits_weight": 1.0,
         "mse_weight": 1.0,
         "aux_weight": 0.3,
+        # 第二维失真项：log_mse（默认）| psnr | vmaf（直接回归 VMAF；模型该维输出即为 VMAF）
+        "mse_term": "log_mse",
+        # mse_term=psnr 时 Huber delta：未设 huber_delta_psnr 时为 train.huber_delta * huber_delta_psnr_scale（默认 5，约对应 dB 量级）
+        "huber_delta_psnr": None,
+        "huber_delta_psnr_scale": 5.0,
+        # mse_term=vmaf 时：默认 train.huber_delta * huber_delta_vmaf_scale（约 0～100 分制）
+        "huber_delta_vmaf": None,
+        "huber_delta_vmaf_scale": 2.0,
     },
     "model": {
+        # single：单头同时预测 bits + log(mse)；double：与 single 同架构但 head 仅 1 维，分两次训练专用于 bits 或失真
+        "mode": "single",
+        # mode=double 时必填：bits（_double_bits）| distortion（_double_psnr | _double_mse | _double_vmaf，由 loss.mse_term）
+        "double_target": "bits",
         "self_hidden": 128,
         "edge_hidden": 128,
         "state_hidden": 64,
@@ -113,3 +134,73 @@ def load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         user_cfg = yaml.safe_load(f)
     return _deep_update(DEFAULT_CONFIG, user_cfg or {})
+
+
+def normalize_mse_term(term: str) -> str:
+    """将命令行/环境的失真项别名统一为 YAML 使用的 loss.mse_term。"""
+    t = str(term).lower().strip()
+    if t == "psnr":
+        return "psnr"
+    if t == "vmaf":
+        return "vmaf"
+    if t in ("log_mse", "logmse", "mse", ""):
+        return "log_mse"
+    raise ValueError(
+        f'loss.mse_term 必须是 log_mse、mse、logmse、psnr 或 vmaf 之一，当前为 {term!r}'
+    )
+
+
+def resolve_train_override_cli_env(cli_val: str | None, env_key: str) -> tuple[str | None, str | None]:
+    """命令行优先，否则读环境变量。返回 (值, 来源) 来源为 cli | env；未覆盖为 (None, None)。"""
+    if cli_val is not None:
+        s = str(cli_val).strip()
+        if s != "":
+            return s, "cli"
+    v = os.environ.get(env_key)
+    if v is not None and str(v).strip() != "":
+        return str(v).strip(), "env"
+    return None, None
+
+
+# 训练/评估脚本共用：未传 CLI 时可由 shell export 循环注入
+ENV_TRAIN_MODEL_MODE = "QP_TRAIN_MODEL_MODE"
+ENV_TRAIN_DOUBLE_TARGET = "QP_TRAIN_DOUBLE_TARGET"
+ENV_TRAIN_MSE_TERM = "QP_TRAIN_MSE_TERM"
+
+
+def apply_train_overrides(
+    cfg: dict,
+    *,
+    model_mode: str | None = None,
+    double_target: str | None = None,
+    mse_term: str | None = None,
+    model_mode_src: str | None = None,
+    double_target_src: str | None = None,
+    mse_term_src: str | None = None,
+) -> list[str]:
+    """
+    在 load_config 之后覆盖 model.mode / model.double_target / loss.mse_term。
+    返回人类可读日志行（含来源 cli|env），便于确认与 YAML 的差异。
+    """
+    msgs: list[str] = []
+
+    if model_mode is not None:
+        m = str(model_mode).lower().strip()
+        if m not in ("single", "double"):
+            raise ValueError(f'model.mode 必须是 single 或 double，当前为 {model_mode!r}')
+        cfg["model"]["mode"] = m
+        msgs.append(f"model.mode={m} ({model_mode_src or 'cli'})")
+
+    if double_target is not None:
+        d = str(double_target).lower().strip()
+        if d not in ("bits", "distortion"):
+            raise ValueError(f'model.double_target 必须是 bits 或 distortion，当前为 {double_target!r}')
+        cfg["model"]["double_target"] = d
+        msgs.append(f"model.double_target={d} ({double_target_src or 'cli'})")
+
+    if mse_term is not None:
+        nt = normalize_mse_term(mse_term)
+        cfg["loss"]["mse_term"] = nt
+        msgs.append(f"loss.mse_term={nt} ({mse_term_src or 'cli'})")
+
+    return msgs

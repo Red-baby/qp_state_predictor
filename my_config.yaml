@@ -1,7 +1,8 @@
 seed: 42
 
 data:
-  labels_csv: "/data/lh/qp_state_predictor/dataset/vca_rc_merged_with_pass1.csv"
+  # VMAF 训练请用带 pass1_vmaf/pass2_vmaf 的合并表
+  labels_csv: "/data/lh/qp_state_predictor/dataset/vca_rc_merged_with_pass1_vmaf.csv"
   yuv_root: "/mnt/ec-data2/lh_data/vtcoder_yuv/720p/"
   cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_cache/"
   output_root: "/data/lh/qp_state_predictor/outputs/"
@@ -51,8 +52,15 @@ data:
     bits: "pass1_bits"
     mse: "pass1_mse"
     psnr: "pass1_psnr"
+    # loss.mse_term=vmaf 时作为网络输入第 3 维（见 pass1_vmaf_norm_div）；列名默认可不填
+    vmaf: "pass1_vmaf"
 
-  # 输出目录 = output_root / phase{N}{suffix}；关 pass1 为 phase1，开 pass1 为 phase1_pass1（可改后缀）
+  # CSV 列为 pass1_vmaf / pass2_vmaf；mse_term=vmaf 时仅 vmaf_col 指向的那一列作为监督标签
+  vmaf_col: "pass2_vmaf" # 改 "pass1_vmaf" 则用第一遍编码段 VMAF 作标签
+
+  # 输出目录名 = phase{N} + pass1 后缀 + 后缀：
+  #   model.mode=single：+ _logmse | _psnr | _vmaf（由 loss.mse_term）
+  #   model.mode=double：+ _double_bits | _double_psnr | _double_mse | _double_vmaf
   output_phase_no_pass1_suffix: ""
   output_phase_pass1_suffix: "_pass1"
 
@@ -70,13 +78,16 @@ features:
 
 train:
   num_workers: 64
+  # 每 epoch 是否在训练集上跑完整 eval；false 可省大量内存/时间（val/test 仍 eval）。OOM 时可设 false
+  eval_full_train_each_epoch: true
   # DataLoader 预取（仅 num_workers>0 生效）；远端盘慢时可试 6～8
   prefetch_factor: 8
-  epochs: 60
+  epochs: 50
   # 单卡：即为该卡 batch。双卡 DDP（torchrun）：为每卡 batch，全局 batch ≈ 该值 × GPU 数
   batch_size_phase1: 512
-  batch_size_phase2: 2048
-  batch_size_phase3: 128
+  batch_size_phase2: 512
+  # Phase3：当前实现要求 batch 内 topo_order 一致；不同 segment 拓扑不同须设为 1，否则会报错
+  batch_size_phase3: 1
   lr: 1.0e-3
   weight_decay: 1.0e-5
   huber_delta: 0.2
@@ -91,8 +102,23 @@ loss:
   bits_weight: 1.0
   mse_weight: 1.0
   aux_weight: 0.3
+  # 失真第二项：log_mse | psnr | vmaf（直接回归 VMAF；需 data.vmaf_col 与 CSV 列）
+  mse_term: "psnr"
+  huber_delta_psnr: null
+  huber_delta_psnr_scale: 5.0
+  # huber_delta_vmaf: null
+  # huber_delta_vmaf_scale: 2.0
 
+# 训练脚本可用 CLI/环境变量覆盖 model.mode、model.double_target、loss.mse_term，便于循环扫参：
+#   python -m qp_predictor.train --config my_config.yaml --phase 1 --model-mode single --mse-term psnr
+#   python -m qp_predictor.train --config my_config.yaml --phase 2 --model-mode double --double-target bits
+#   python -m qp_predictor.train --config my_config.yaml --phase 1 --model-mode double --double-target distortion --mse-term log_mse
+# 环境变量（CLI 未写时）：QP_TRAIN_MODEL_MODE, QP_TRAIN_DOUBLE_TARGET, QP_TRAIN_MSE_TERM
 model:
+  # single：一头输出 2 维 (bits, log_mse)；double：两头各训一个同结构单输出网络，目录见 data 说明
+  mode: "double"
+  # mode=double 时：bits → 仅训码率；distortion → 仅训失真（psnr→_double_psnr，log_mse→_double_mse，vmaf→_double_vmaf）
+  double_target: "bits"
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64

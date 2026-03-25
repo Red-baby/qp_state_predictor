@@ -22,13 +22,14 @@ class MLP(nn.Module):
 
 
 class Phase1Net(nn.Module):
-    def __init__(self, self_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
+    def __init__(self, self_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
         super().__init__()
         hid = int(cfg["model"]["head_hidden"])
         dropout = float(cfg["model"]["dropout"])
         self.pass1_dim = pass1_dim
+        self.out_dim = int(out_dim)
         in_dim = self_dim + meta_dim + 1 + pass1_dim
-        self.net = MLP(in_dim, hid, 2, dropout=dropout, num_layers=3)
+        self.net = MLP(in_dim, hid, self.out_dim, dropout=dropout, num_layers=3)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         parts = [batch["self_feats"], batch["meta_feats"], batch["qp"]]
@@ -40,14 +41,15 @@ class Phase1Net(nn.Module):
 
 
 class Phase2Net(nn.Module):
-    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
+    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
         super().__init__()
         hid = int(cfg["model"]["head_hidden"])
         dropout = float(cfg["model"]["dropout"])
         self.pass1_dim = pass1_dim
+        self.out_dim = int(out_dim)
         ref_single = self_dim + pair_dim + 1 + 1 + pass1_dim
         in_dim = self_dim + meta_dim + 1 + pass1_dim + 2 * ref_single
-        self.net = MLP(in_dim, hid, 2, dropout=dropout, num_layers=3)
+        self.net = MLP(in_dim, hid, self.out_dim, dropout=dropout, num_layers=3)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         ref_valid = batch["ref_valid_mask"].unsqueeze(-1)
@@ -71,7 +73,7 @@ class Phase2Net(nn.Module):
 
 
 class Phase3Net(nn.Module):
-    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0):
+    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, head_out_dim: int = 2):
         super().__init__()
         self.state_dim = int(cfg["model"]["state_dim"])
         self.self_hidden = int(cfg["model"]["self_hidden"])
@@ -80,6 +82,7 @@ class Phase3Net(nn.Module):
         self.head_hidden = int(cfg["model"]["head_hidden"])
         self.dropout = float(cfg["model"]["dropout"])
         self.pass1_dim = pass1_dim
+        self.head_out_dim = int(head_out_dim)
 
         self.self_encoder = MLP(
             in_dim=self_dim + meta_dim + 1 + pass1_dim,
@@ -105,14 +108,14 @@ class Phase3Net(nn.Module):
         self.main_head = MLP(
             in_dim=self.self_hidden + self.edge_hidden + self.state_dim,
             hidden_dim=self.head_hidden,
-            out_dim=2,
+            out_dim=self.head_out_dim,
             dropout=self.dropout,
             num_layers=3,
         )
         self.aux_head = MLP(
             in_dim=self.state_dim,
             hidden_dim=self.state_hidden,
-            out_dim=2,
+            out_dim=self.head_out_dim,
             dropout=self.dropout,
             num_layers=2,
         )
@@ -142,8 +145,8 @@ class Phase3Net(nn.Module):
             enc_parts.append(batch["pass1_feats"])
         u = self.self_encoder(torch.cat(enc_parts, dim=-1))
         z = torch.zeros(B, T, self.state_dim, device=device, dtype=u.dtype)
-        pred = torch.zeros(B, T, 2, device=device, dtype=u.dtype)
-        aux = torch.zeros(B, T, 2, device=device, dtype=u.dtype)
+        pred = torch.zeros(B, T, self.head_out_dim, device=device, dtype=u.dtype)
+        aux = torch.zeros(B, T, self.head_out_dim, device=device, dtype=u.dtype)
 
         for t_idx in topo.tolist():
             u_t = u[:, t_idx, :]
@@ -157,7 +160,8 @@ class Phase3Net(nn.Module):
 
                 u_r = torch.zeros_like(u_t)
                 z_r = torch.zeros(B, self.state_dim, device=device, dtype=u.dtype)
-                q_r = torch.zeros(B, 1, device=device, dtype=u.dtype)
+                # qps 来自 DataLoader 常为 float32；AMP 下 u 为 float16，勿用 u.dtype 建 q_r，否则 index_put 与 qps 切片 dtype 不一致
+                q_r = torch.zeros(B, 1, device=device, dtype=qps.dtype)
 
                 valid_flat = ref_local >= 0
                 if valid_flat.any():

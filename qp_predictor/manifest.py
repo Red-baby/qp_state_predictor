@@ -121,26 +121,54 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
     df["mse"] = df[mse_col]
     df["valid_train"] = df["valid_train"].astype(int)
 
+    mse_term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
+    if mse_term == "vmaf":
+        vcol = data_cfg.get("vmaf_col")
+        if not vcol:
+            raise ValueError(
+                'loss.mse_term 为 "vmaf" 时必须在 data.vmaf_col 中指定 CSV 列名（如 pass2_vmaf）。'
+            )
+        if vcol not in df.columns:
+            raise ValueError(f"CSV 缺少 VMAF 列 {vcol!r}（loss.mse_term=vmaf 需要该列作为失真标签）。")
+        df["vmaf"] = df[vcol].astype(float)
+
     if data_cfg.get("use_pass1_features", False):
         p1cols = data_cfg.get("pass1_columns", {})
         p1_qp_col = p1cols.get("qp")
         p1_bits_col = p1cols.get("bits")
         p1_mse_col = p1cols.get("mse")
         p1_psnr_col = p1cols.get("psnr")
+        p1_vmaf_col = p1cols.get("vmaf")
 
-        needed = [c for c in (p1_qp_col, p1_bits_col, p1_mse_col) if c]
-        missing = [c for c in needed if c not in df.columns]
-        if missing:
-            raise ValueError(
-                f"use_pass1_features=true 但 CSV 中缺少 pass1 列: {missing}。"
-                " 请检查 data.pass1_columns 配置与 labels_csv 是否一致。"
-            )
+        if mse_term == "vmaf":
+            vmaf_pass1_col = p1_vmaf_col or "pass1_vmaf"
+            needed = [c for c in (p1_qp_col, p1_bits_col, vmaf_pass1_col) if c]
+            missing = [c for c in needed if c not in df.columns]
+            if missing:
+                raise ValueError(
+                    f"use_pass1_features=true 且 loss.mse_term=vmaf 时，CSV 须含 pass1 列: {missing}。"
+                    f" 第 3 维先验为 {vmaf_pass1_col!r}（可在 data.pass1_columns.vmaf 覆盖列名）。"
+                )
+        else:
+            needed = [c for c in (p1_qp_col, p1_bits_col, p1_mse_col) if c]
+            missing = [c for c in needed if c not in df.columns]
+            if missing:
+                raise ValueError(
+                    f"use_pass1_features=true 但 CSV 中缺少 pass1 列: {missing}。"
+                    " 请检查 data.pass1_columns 配置与 labels_csv 是否一致。"
+                )
 
         if p1_qp_col and p1_qp_col in df.columns:
             df["pass1_qp"] = df[p1_qp_col].astype(float)
         if p1_bits_col and p1_bits_col in df.columns:
             df["pass1_bits"] = df[p1_bits_col].astype(float)
-        if p1_mse_col and p1_mse_col in df.columns:
+        if mse_term == "vmaf":
+            df["pass1_vmaf"] = df[vmaf_pass1_col].astype(float)
+            if p1_mse_col and p1_mse_col in df.columns:
+                df["pass1_mse"] = df[p1_mse_col].astype(float)
+            else:
+                df["pass1_mse"] = 0.0
+        elif p1_mse_col and p1_mse_col in df.columns:
             df["pass1_mse"] = df[p1_mse_col].astype(float)
         if p1_psnr_col and p1_psnr_col in df.columns:
             df["pass1_psnr"] = df[p1_psnr_col].astype(float)
