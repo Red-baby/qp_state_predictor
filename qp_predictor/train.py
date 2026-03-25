@@ -28,7 +28,7 @@ from .config import (
 from .datasets import FrameDataset, SegmentDataset
 from .features import pair_feature_names, pass1_feature_names, self_feature_names
 from .manifest import build_manifest
-from .models import Phase1Net, Phase2Net, Phase3Net
+from .models import Phase1Net, Phase2Net, Phase2_1Net, Phase3Net
 from .utils import (
     compute_psnr_from_mse_torch,
     ensure_dir,
@@ -93,6 +93,10 @@ def double_target(cfg: dict) -> str:
     return str(cfg.get("model", {}).get("double_target", "bits")).lower().strip()
 
 
+def phase2_variant(cfg: dict) -> str:
+    return str(cfg.get("model", {}).get("phase2_variant", "flat")).lower().strip()
+
+
 def model_mode_tag(cfg: dict) -> str:
     """与 evaluate_loader 返回的 model_mode 一致。"""
     if not is_double_mode(cfg):
@@ -143,6 +147,12 @@ def _double_mode_dir_suffix(cfg: dict) -> str:
 def phase_output_dirname(cfg: dict, phase: int) -> str:
     """输出目录名：phase{N} + pass1/no_pass1 后缀 + 单头失真后缀 或 double 后缀。"""
     base = f"phase{phase}"
+    if phase == 2:
+        v = phase2_variant(cfg)
+        if v not in ("flat", "phase2_1"):
+            raise ValueError(f'model.phase2_variant 必须为 "flat" 或 "phase2_1"，当前为 {v!r}')
+        if v != "flat":
+            base = v
     data_cfg = cfg["data"]
     if is_double_mode(cfg):
         dist_suf = _double_mode_dir_suffix(cfg)
@@ -180,7 +190,26 @@ def build_model(cfg: dict, phase: int):
     if phase == 1:
         return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
     if phase == 2:
-        return Phase2Net(self_dim=self_dim, pair_dim=pair_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        v = phase2_variant(cfg)
+        if v == "flat":
+            return Phase2Net(
+                self_dim=self_dim,
+                pair_dim=pair_dim,
+                meta_dim=meta_dim,
+                pass1_dim=pass1_dim,
+                cfg=cfg,
+                out_dim=head_out,
+            )
+        if v == "phase2_1":
+            return Phase2_1Net(
+                self_dim=self_dim,
+                pair_dim=pair_dim,
+                meta_dim=meta_dim,
+                pass1_dim=pass1_dim,
+                cfg=cfg,
+                out_dim=head_out,
+            )
+        raise ValueError(f'model.phase2_variant 必须为 "flat" 或 "phase2_1"，当前为 {v!r}')
     if phase == 3:
         return Phase3Net(self_dim=self_dim, pair_dim=pair_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, head_out_dim=head_out)
     raise ValueError(f"Unsupported phase: {phase}")

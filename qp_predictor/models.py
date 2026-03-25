@@ -72,6 +72,92 @@ class Phase2Net(nn.Module):
         return {"pred": pred}
 
 
+class Phase2_1Net(nn.Module):
+    def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
+        super().__init__()
+        hid = int(cfg["model"]["head_hidden"])
+        edge_hid = int(cfg["model"]["edge_hidden"])
+        dropout = float(cfg["model"]["dropout"])
+        self.pass1_dim = pass1_dim
+        self.out_dim = int(out_dim)
+
+        cur_in = self_dim + meta_dim + 1 + pass1_dim
+        ref_in = self_dim + 1 + pass1_dim
+        edge_in = (hid * 3) + pair_dim + 1 + 1 + pass1_dim
+
+        self.current_encoder = MLP(cur_in, hid, hid, dropout=dropout, num_layers=3)
+        self.ref_encoder = MLP(ref_in, hid, hid, dropout=dropout, num_layers=3)
+        self.edge_encoder = MLP(edge_in, edge_hid, edge_hid, dropout=dropout, num_layers=3)
+        self.edge_gate = nn.Linear(edge_hid, 1)
+        self.trunk = MLP(hid + edge_hid, hid, hid, dropout=dropout, num_layers=3)
+
+        if self.out_dim == 1:
+            self.single_head = MLP(hid, hid, 1, dropout=dropout, num_layers=2)
+        else:
+            self.bits_head = MLP(hid, hid, 1, dropout=dropout, num_layers=2)
+            self.distortion_head = MLP(hid, hid, 1, dropout=dropout, num_layers=2)
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        self_feats = batch["self_feats"]
+        meta_feats = batch["meta_feats"]
+        qp = batch["qp"]
+        ref_feats = batch["ref_feats"]
+        pair_feats = batch["pair_feats"]
+        ref_qps = batch["ref_qps"]
+        ref_valid = batch["ref_valid_mask"].unsqueeze(-1)
+
+        B = self_feats.shape[0]
+        ref_count = ref_feats.shape[1]
+
+        cur_parts = [self_feats, meta_feats, qp]
+        cur_pass1 = None
+        if self.pass1_dim > 0:
+            if "pass1_feats" in batch:
+                cur_pass1 = batch["pass1_feats"]
+            else:
+                cur_pass1 = torch.zeros(B, self.pass1_dim, device=self_feats.device, dtype=self_feats.dtype)
+            cur_parts.append(cur_pass1)
+        u_t = self.current_encoder(torch.cat(cur_parts, dim=-1))
+
+        ref_parts = [ref_feats, ref_qps]
+        ref_pass1 = None
+        if self.pass1_dim > 0:
+            if "ref_pass1_feats" in batch:
+                ref_pass1 = batch["ref_pass1_feats"]
+            else:
+                ref_pass1 = torch.zeros(
+                    B, ref_count, self.pass1_dim, device=self_feats.device, dtype=self_feats.dtype
+                )
+            ref_parts.append(ref_pass1)
+        u_r = self.ref_encoder(torch.cat(ref_parts, dim=-1))
+
+        u_t_rep = u_t.unsqueeze(1).expand(-1, ref_count, -1)
+        edge_parts = [
+            u_t_rep,
+            u_r,
+            torch.abs(u_t_rep - u_r),
+            pair_feats,
+            qp.unsqueeze(1) - ref_qps,
+        ]
+        if self.pass1_dim > 0 and cur_pass1 is not None and ref_pass1 is not None:
+            edge_parts.append(cur_pass1.unsqueeze(1).expand(-1, ref_count, -1) - ref_pass1)
+        edge_parts.append(ref_valid)
+
+        edge_embed = self.edge_encoder(torch.cat(edge_parts, dim=-1)) * ref_valid
+        gate_logits = self.edge_gate(edge_embed)
+        gate_logits = gate_logits.masked_fill(ref_valid <= 0, -1e9)
+        edge_weights = torch.softmax(gate_logits, dim=1) * ref_valid
+        edge_weights = edge_weights / edge_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
+        context = (edge_weights * edge_embed).sum(dim=1)
+
+        h = self.trunk(torch.cat([u_t, context], dim=-1))
+        if self.out_dim == 1:
+            pred = self.single_head(h)
+        else:
+            pred = torch.cat([self.bits_head(h), self.distortion_head(h)], dim=-1)
+        return {"pred": pred, "ref_weights": edge_weights.squeeze(-1), "context": context, "u_t": u_t}
+
+
 class Phase3Net(nn.Module):
     def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, head_out_dim: int = 2):
         super().__init__()

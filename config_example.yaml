@@ -97,6 +97,7 @@ loss:
 model:
   mode: "single"
   double_target: "bits"
+  phase2_variant: "flat"   # flat | phase2_1
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64
