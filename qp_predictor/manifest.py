@@ -108,6 +108,9 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
     explicit_layer = explicit.get("temporal_layer")
     explicit_ref1 = explicit.get("ref_poc_1")
     explicit_ref2 = explicit.get("ref_poc_2")
+    explicit_ref_qp1 = explicit.get("ref_qp_1")
+    explicit_ref_qp2 = explicit.get("ref_qp_2")
+    intra_period_pos_col = data_cfg.get("intra_period_pos_col")
 
     if explicit_frame_type and explicit_frame_type in df.columns:
         df["frame_type"] = df[explicit_frame_type].astype(str)
@@ -117,6 +120,10 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
         df["ref_poc_1"] = df[explicit_ref1].fillna(-1).astype(int)
     if explicit_ref2 and explicit_ref2 in df.columns:
         df["ref_poc_2"] = df[explicit_ref2].fillna(-1).astype(int)
+    if explicit_ref_qp1 and explicit_ref_qp1 in df.columns:
+        df["ref_qp_1"] = df[explicit_ref_qp1].astype(float)
+    if explicit_ref_qp2 and explicit_ref_qp2 in df.columns:
+        df["ref_qp_2"] = df[explicit_ref_qp2].astype(float)
 
     if "frame_type" not in df.columns:
         df["frame_type"] = df["template_frame_type"].astype(str)
@@ -134,12 +141,8 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
             ref_local_2 = df["template_ref_local_2"].fillna(-1).astype(int)
             df["ref_poc_2"] = np.where(ref_local_2 >= 0, segment_start + ref_local_2, -1).astype(int)
 
-    df["num_refs"] = ((df["ref_poc_1"] >= 0).astype(int) + (df["ref_poc_2"] >= 0).astype(int))
     df["valid_train"] = df["template_valid_train"].fillna(0).astype(int)
 
-    df["distance_to_prev_I"] = df["local_poc"].astype(int)
-    df["distance_to_next_I"] = (df["segment_span"].astype(int) - df["local_poc"].astype(int)).astype(int)
-    df["is_first_after_I"] = ((df["local_poc"] > 0) & (df["local_poc"] <= int(data_cfg["gop_size"]))).astype(int)
     df["ref_distance_1"] = (df[poc_col] - df["ref_poc_1"]).where(df["ref_poc_1"] >= 0, -1).astype(int)
     df["ref_distance_2"] = (df["ref_poc_2"] - df[poc_col]).where(df["ref_poc_2"] >= 0, -1).astype(int)
 
@@ -166,6 +169,15 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
     df["valid_train"] = df["valid_train"].astype(int)
     df["segment_last_local"] = df["segment_last_local"].fillna(df["local_poc"]).astype(int)
     df["segment_span"] = df["segment_span"].fillna(df["segment_last_local"] + 1).astype(int)
+    if intra_period_pos_col:
+        if intra_period_pos_col not in df.columns:
+            raise ValueError(f"CSV 缺少 intra_period_pos 列: {intra_period_pos_col!r}")
+        df["intra_period_pos"] = df[intra_period_pos_col].astype(float).clip(0.0, 1.0)
+    else:
+        denom = np.maximum(df["segment_span"].values.astype(np.float64) - 1.0, 1.0)
+        df["intra_period_pos"] = (
+            df["local_poc"].values.astype(np.float64) / denom
+        ).clip(0.0, 1.0).astype(np.float32)
 
     mse_term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
     if mse_term == "vmaf":

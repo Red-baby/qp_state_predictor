@@ -29,13 +29,16 @@ data:
   i_interval: 125
   gop_size: 16
   tail_hier_min: 4
-  infer_refs_if_missing: true
+  infer_refs_if_missing: false
 
   explicit_ref_columns:
     frame_type: null
-    temporal_layer: null
-    ref_poc_1: null
-    ref_poc_2: null
+    temporal_layer: "level"
+    ref_poc_1: "refpoc0"
+    ref_poc_2: "refpoc1"
+    ref_qp_1: "refqp0"
+    ref_qp_2: "refqp1"
+  intra_period_pos_col: "intra_period_pos"
 
   train_ratio: 0.8
   val_ratio: 0.1

@@ -8,12 +8,21 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .features import extract_pair_features, pair_feature_names, pass1_feature_names
+from .features import (
+    extract_pair_features,
+    extract_self_features,
+    meta_feature_names,
+    pair_feature_names,
+    pass1_feature_names,
+    resolve_feature_profile,
+    self_feature_storage_key,
+)
 from .graph import build_segment_topo_order
 from .pair_cache import PairCacheManager
-from .utils import frame_type_onehot, normalize_qp
+from .utils import frame_type_onehot, frame_type_to_id, normalize_qp, temporal_layer_onehot
 
 _PAIR_FALLBACK_WARNED = False
+_SELF_FALLBACK_WARNED: set[str] = set()
 
 
 def _warn_pair_fallback_once() -> None:
@@ -26,6 +35,17 @@ def _warn_pair_fallback_once() -> None:
             stacklevel=2,
         )
         _PAIR_FALLBACK_WARNED = True
+
+
+def _warn_self_fallback_once(profile: str) -> None:
+    if profile not in _SELF_FALLBACK_WARNED:
+        warnings.warn(
+            f"cache 缺少 {self_feature_storage_key(profile)}，回退在线 extract_self_features（较慢）。"
+            " 请重新运行 python -m qp_predictor.preprocess_cache --config ...",
+            UserWarning,
+            stacklevel=2,
+        )
+        _SELF_FALLBACK_WARNED.add(profile)
 
 
 class CacheManager:
@@ -42,28 +62,36 @@ class CacheManager:
         return self._cache[sequence]
 
 
-def build_meta_vector(row: pd.Series, i_interval: int) -> np.ndarray:
+def build_meta_vector(row: pd.Series, i_interval: int, feature_profile: str = "legacy") -> np.ndarray:
     segment_span = int(row["segment_span"]) if "segment_span" in row and int(row["segment_span"]) > 0 else int(i_interval)
-    frame_oh = frame_type_onehot(str(row["frame_type"]))
-    tl = float(row["temporal_layer"]) if int(row["temporal_layer"]) >= 0 else -1.0
-    num_refs = float(row["num_refs"])
-    local_poc = float(row["local_poc"]) / max(segment_span - 1, 1)
-    d_prev_i = float(row["distance_to_prev_I"]) / max(segment_span, 1)
-    d_next_i = float(row["distance_to_next_I"]) / max(segment_span, 1)
+    tl_oh = temporal_layer_onehot(int(row["temporal_layer"]))
+    if "intra_period_pos" in row and pd.notna(row["intra_period_pos"]):
+        intra_period_pos = float(row["intra_period_pos"])
+    else:
+        intra_period_pos = float(row["local_poc"]) / max(segment_span - 1, 1)
+    intra_period_pos = float(np.clip(intra_period_pos, 0.0, 1.0))
     ref_d1 = float(row["ref_distance_1"]) / max(segment_span, 1) if int(row["ref_distance_1"]) >= 0 else -1.0
     ref_d2 = float(row["ref_distance_2"]) / max(segment_span, 1) if int(row["ref_distance_2"]) >= 0 else -1.0
-    is_first = float(row["is_first_after_I"])
+    if str(feature_profile).lower().strip() in ("bits", "vmaf"):
+        frame_oh = frame_type_onehot(str(row["frame_type"]))
+        num_valid_refs = float((int(row["ref_poc_1"]) >= 0) + (int(row["ref_poc_2"]) >= 0)) / 2.0
+        vec = np.concatenate([
+            frame_oh,
+            tl_oh,
+            np.asarray([
+                intra_period_pos,
+                ref_d1,
+                ref_d2,
+                num_valid_refs,
+            ], dtype=np.float32),
+        ], axis=0)
+        return vec.astype(np.float32)
     vec = np.concatenate([
-        frame_oh,
+        tl_oh,
         np.asarray([
-            tl / 8.0,
-            num_refs / 2.0,
-            local_poc,
-            d_prev_i,
-            d_next_i,
+            intra_period_pos,
             ref_d1,
             ref_d2,
-            is_first,
         ], dtype=np.float32),
     ], axis=0)
     return vec.astype(np.float32)
@@ -87,7 +115,11 @@ class FrameDataset(Dataset):
     def __init__(self, manifest: pd.DataFrame, cfg: dict, split_df: pd.DataFrame, phase: int):
         self.cfg = cfg
         self.phase = int(phase)
+        self.feature_profile = resolve_feature_profile(cfg, self.phase)
         self.i_interval = int(cfg["data"]["i_interval"])
+        self.self_block_size = int(cfg["features"]["block_size"])
+        self.entropy_bins = int(cfg["features"]["entropy_bins"])
+        self.edge_threshold = float(cfg["features"]["edge_threshold"])
         self.block_size = int(cfg["features"]["pair_block_size"])
         self.changed_threshold = float(cfg["features"]["changed_threshold"])
         self.cache_manager = CacheManager(cfg["data"]["cache_dir"])
@@ -97,7 +129,8 @@ class FrameDataset(Dataset):
         df = split_df.copy()
         df = df[df["valid_train"] == 1].reset_index(drop=True)
         self.df = df.reset_index(drop=True)
-        self._pair_dim = len(pair_feature_names())
+        self._self_key = self_feature_storage_key(self.feature_profile)
+        self._pair_dim = len(pair_feature_names(self.feature_profile))
 
         self._qp_lookup = {}
         for _, r in self.df.iterrows():
@@ -114,7 +147,7 @@ class FrameDataset(Dataset):
         feat_cfg = cfg["features"]
         self._use_pair_cache = self.phase == 2 and bool(feat_cfg.get("use_pair_cache", False))
         self._pair_fallback = bool(feat_cfg.get("pair_cache_fallback_online", True))
-        self._pair_cache = PairCacheManager(cfg) if self._use_pair_cache else None
+        self._pair_cache = PairCacheManager(cfg, feature_profile=self.feature_profile) if self._use_pair_cache else None
 
     def __len__(self):
         return len(self.df)
@@ -122,10 +155,28 @@ class FrameDataset(Dataset):
     def _get_cache_feats(self, sequence: str, poc: int, *, need_y_low: bool):
         """need_y_low=False 时只读 self_features（Phase 1），避免多读整帧 y_lowres，减轻远端盘随机读。"""
         cache = self.cache_manager.load(sequence)
-        self_feats = cache["self_features"][poc].astype(np.float32)
+        y_low = None
+        if self._self_key in cache:
+            self_feats = cache[self._self_key][poc].astype(np.float32)
+            if not need_y_low:
+                return self_feats, None
+            y_low = cache["y_lowres"][poc].astype(np.uint8)
+            return self_feats, y_low
+
+        if "y_lowres" not in cache:
+            raise KeyError(f"Cache missing {self._self_key!r} and y_lowres for fallback: {sequence}")
+
+        y_low = cache["y_lowres"][poc].astype(np.uint8)
+        _warn_self_fallback_once(self.feature_profile)
+        self_feats = extract_self_features(
+            y_low,
+            block_size=self.self_block_size,
+            entropy_bins=self.entropy_bins,
+            edge_threshold=self.edge_threshold,
+            feature_profile=self.feature_profile,
+        ).astype(np.float32)
         if not need_y_low:
             return self_feats, None
-        y_low = cache["y_lowres"][poc].astype(np.uint8)
         return self_feats, y_low
 
     def _phase2_need_cur_y_low(self, seq: str, poc: int, row: pd.Series) -> bool:
@@ -154,7 +205,7 @@ class FrameDataset(Dataset):
         else:
             need_y = False
         self_feats, y_low = self._get_cache_feats(seq, poc, need_y_low=need_y)
-        meta = build_meta_vector(row, self.i_interval)
+        meta = build_meta_vector(row, self.i_interval, feature_profile=self.feature_profile)
         qp = np.asarray([normalize_qp(float(row["qp"]), self.cfg["data"])], dtype=np.float32)
 
         target_bits = np.log1p(float(row["bits"]))
@@ -170,7 +221,7 @@ class FrameDataset(Dataset):
             "meta_feats": torch.from_numpy(meta),
             "qp": torch.from_numpy(qp),
             "target": torch.from_numpy(target),
-            "frame_type_id": torch.tensor(int(np.argmax(meta[:4])), dtype=torch.long),
+            "frame_type_id": torch.tensor(frame_type_to_id(str(row["frame_type"])), dtype=torch.long),
             "temporal_layer": torch.tensor(int(row["temporal_layer"]), dtype=torch.long),
             "valid_mask": torch.tensor(float(row["valid_train"]), dtype=torch.float32),
             "base_uid": str(row["base_uid"]),
@@ -188,7 +239,7 @@ class FrameDataset(Dataset):
             ref_pass1_all = []
             seg_uid = str(row["segment_uid"])
 
-            for ref_col in ["ref_poc_1", "ref_poc_2"]:
+            for ref_col, ref_qp_col in zip(["ref_poc_1", "ref_poc_2"], ["ref_qp_1", "ref_qp_2"]):
                 ref_poc = int(row[ref_col])
                 if ref_poc >= 0:
                     pair_feats: np.ndarray | None = None
@@ -206,12 +257,16 @@ class FrameDataset(Dataset):
                             ref_y,
                             block_size=self.block_size,
                             changed_threshold=self.changed_threshold,
+                            feature_profile=self.feature_profile,
                         )
                     else:
                         raise RuntimeError(
                             f"pair cache 未命中且不允许回退: {seq} cur={poc} ref={ref_poc}"
                         )
-                    ref_qp = self._qp_lookup.get((seg_uid, ref_poc), float(row["qp"]))
+                    if ref_qp_col in row.index and pd.notna(row[ref_qp_col]):
+                        ref_qp = float(row[ref_qp_col])
+                    else:
+                        ref_qp = self._qp_lookup.get((seg_uid, ref_poc), float(row["qp"]))
                     ref_valid = 1.0
 
                     if self._use_pass1:
@@ -288,9 +343,10 @@ class SegmentDataset(Dataset):
 
         cache = self.cache_manager.load(seq)
         feat_dim = cache["self_features"].shape[1]
+        meta_dim = len(meta_feature_names())
 
         self_feats = np.zeros((T, feat_dim), dtype=np.float32)
-        meta_feats = np.zeros((T, 12), dtype=np.float32)
+        meta_feats = np.zeros((T, meta_dim), dtype=np.float32)
         qps = np.zeros((T, 1), dtype=np.float32)
         targets = np.zeros((T, 2), dtype=np.float32)
         valid_loss_mask = np.zeros((T,), dtype=np.float32)
@@ -318,7 +374,7 @@ class SegmentDataset(Dataset):
             else:
                 targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
             valid_loss_mask[t] = float(row["valid_train"])
-            frame_type_ids[t] = int(np.argmax(meta_feats[t, :4]))
+            frame_type_ids[t] = frame_type_to_id(str(row["frame_type"]))
             temporal_layers[t] = int(row["temporal_layer"])
             if self._use_pass1:
                 pass1_feats[t] = build_pass1_vector(row, self.cfg)

@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
+TEMPORAL_LAYER_BUCKETS: tuple[int, ...] = (0, 1, 2, 3, 4, 6)
+
 
 def qp_norm_span(data_cfg: dict) -> float:
     """QP 线性缩放到约 [0,1] 所用的区间长度 max(qp_norm_max - qp_norm_min, eps)。"""
@@ -133,6 +135,17 @@ def frame_type_onehot(frame_type: str) -> np.ndarray:
     idx = frame_type_to_id(frame_type)
     arr = np.zeros(4, dtype=np.float32)
     arr[idx] = 1.0
+    return arr
+
+
+def temporal_layer_onehot(temporal_layer: int) -> np.ndarray:
+    layer = int(temporal_layer)
+    # 兼容旧模板里的 TL5，将其并入最高层桶。
+    if layer == 5:
+        layer = 6
+    arr = np.zeros(len(TEMPORAL_LAYER_BUCKETS), dtype=np.float32)
+    if layer in TEMPORAL_LAYER_BUCKETS:
+        arr[TEMPORAL_LAYER_BUCKETS.index(layer)] = 1.0
     return arr
 
 

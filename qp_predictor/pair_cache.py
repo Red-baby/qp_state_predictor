@@ -5,19 +5,21 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
-from .features import pair_feature_names
+from .features import normalize_feature_profile, pair_feature_names, pair_feature_storage_key
 
 
 class PairCacheManager:
     """加载 `<sequence>.pair.npz` sidecar，按 (cur_poc, ref_poc) 查询 pair_feats。"""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, feature_profile: str = "legacy"):
         feat = cfg["features"]
         data = cfg["data"]
+        self.feature_profile = normalize_feature_profile(feature_profile)
         self.cache_dir = Path(data["cache_dir"])
         self.suffix = str(feat.get("pair_cache_suffix", ".pair.npz"))
         self.required = bool(feat.get("pair_cache_required", False))
-        self.pair_dim = len(pair_feature_names())
+        self.pair_key = pair_feature_storage_key(self.feature_profile)
+        self.pair_dim = len(pair_feature_names(self.feature_profile))
         self._expected = {
             "resize_width": int(data["resize_width"]),
             "resize_height": int(data["resize_height"]),
@@ -45,7 +47,7 @@ class PairCacheManager:
             else:
                 if int(got) != int(exp):
                     raise ValueError(f"pair cache meta mismatch {k}: file={got} config={exp}")
-        pf = data["pair_feats"]
+        pf = data[self.pair_key]
         if int(pf.shape[1]) != self.pair_dim:
             raise ValueError(f"pair_feats dim {pf.shape[1]} != expected {self.pair_dim}")
 
@@ -57,13 +59,19 @@ class PairCacheManager:
         if not path.is_file():
             if self.required:
                 raise FileNotFoundError(f"pair cache required but missing: {path}")
+            self._stores[sequence] = None
             return None
 
         data = np.load(path, allow_pickle=False, mmap_mode="r")
+        if self.pair_key not in data:
+            if self.required:
+                raise KeyError(f"pair cache missing feature key {self.pair_key!r}: {path}")
+            self._stores[sequence] = None
+            return None
         self._validate_meta(data)
         cur = np.asarray(data["cur_pocs"], dtype=np.int64)
         ref = np.asarray(data["ref_pocs"], dtype=np.int64)
-        pair_feats = data["pair_feats"]
+        pair_feats = data[self.pair_key]
         edge_map = {(int(cur[i]), int(ref[i])): int(i) for i in range(int(cur.shape[0]))}
         store = {"pair_feats": pair_feats, "edge_map": edge_map}
         self._stores[sequence] = store

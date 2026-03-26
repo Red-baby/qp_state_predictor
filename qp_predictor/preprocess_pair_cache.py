@@ -10,7 +10,14 @@ import pandas as pd
 from tqdm import tqdm
 
 from .config import load_config
-from .features import extract_pair_features, pair_feature_names
+from .features import (
+    FEATURE_PROFILE_BITS,
+    FEATURE_PROFILE_LEGACY,
+    FEATURE_PROFILE_VMAF,
+    extract_pair_features,
+    pair_feature_names,
+    pair_feature_storage_key,
+)
 from .manifest import build_manifest
 from .utils import ensure_dir
 
@@ -47,15 +54,28 @@ def main():
     changed_th = float(feat_cfg["changed_threshold"])
     rw = int(data_cfg["resize_width"])
     rh = int(data_cfg["resize_height"])
-    pair_dim = len(pair_feature_names())
+    profiles = (
+        FEATURE_PROFILE_LEGACY,
+        FEATURE_PROFILE_BITS,
+        FEATURE_PROFILE_VMAF,
+    )
+    pair_dims = {profile: len(pair_feature_names(profile)) for profile in profiles}
+    required_keys = {"cur_pocs", "ref_pocs"} | {pair_feature_storage_key(profile) for profile in profiles}
 
     sequences = sorted(manifest["yuv_sequence"].astype(str).unique().tolist())
 
     for sequence in tqdm(sequences, desc="pair_cache sequences"):
         out_path = cache_dir / f"{sequence}{suffix}"
         if out_path.is_file() and not args.force:
-            print(f"[skip] exists: {out_path}")
-            continue
+            data = np.load(out_path, allow_pickle=False, mmap_mode="r")
+            try:
+                existing_keys = set(data.files)
+            finally:
+                data.close()
+            if required_keys.issubset(existing_keys):
+                print(f"[skip] exists: {out_path}")
+                continue
+            print(f"[rebuild] pair cache missing new feature keys: {out_path}")
 
         base_path = cache_dir / f"{sequence}.npz"
         if not base_path.is_file():
@@ -75,42 +95,44 @@ def main():
         ordered = sorted(edges)
         cur_list: list[int] = []
         ref_list: list[int] = []
-        feats_list: list[np.ndarray] = []
+        feats_lists: dict[str, list[np.ndarray]] = {profile: [] for profile in profiles}
 
         for cur_poc, ref_poc in ordered:
             if cur_poc >= int(y_lowres.shape[0]) or ref_poc >= int(y_lowres.shape[0]):
                 raise IndexError(f"{sequence} poc out of range: cur={cur_poc} ref={ref_poc} n={y_lowres.shape[0]}")
             cur_y = np.asarray(y_lowres[cur_poc], dtype=np.uint8)
             ref_y = np.asarray(y_lowres[ref_poc], dtype=np.uint8)
-            pv = extract_pair_features(
-                cur_y,
-                ref_y,
-                block_size=block_size,
-                changed_threshold=changed_th,
-            )
-            if int(pv.shape[0]) != pair_dim:
-                raise ValueError(f"pair_dim mismatch {pv.shape[0]} != {pair_dim}")
             cur_list.append(cur_poc)
             ref_list.append(ref_poc)
-            feats_list.append(pv.astype(np.float32))
+            for profile in profiles:
+                pv = extract_pair_features(
+                    cur_y,
+                    ref_y,
+                    block_size=block_size,
+                    changed_threshold=changed_th,
+                    feature_profile=profile,
+                )
+                if int(pv.shape[0]) != int(pair_dims[profile]):
+                    raise ValueError(f"pair_dim mismatch {pv.shape[0]} != {pair_dims[profile]}")
+                feats_lists[profile].append(pv.astype(np.float32))
 
         cur_pocs = np.asarray(cur_list, dtype=np.int32)
         ref_pocs = np.asarray(ref_list, dtype=np.int32)
-        pair_feats = np.stack(feats_list, axis=0)
+        save_payload = {
+            "cur_pocs": cur_pocs,
+            "ref_pocs": ref_pocs,
+            "resize_width": np.int32(rw),
+            "resize_height": np.int32(rh),
+            "pair_block_size": np.int32(block_size),
+            "changed_threshold": np.float32(changed_th),
+        }
+        for profile in profiles:
+            save_payload[pair_feature_storage_key(profile)] = np.stack(feats_lists[profile], axis=0)
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".npz", dir=str(cache_dir))
         os.close(tmp_fd)
         try:
-            np.savez_compressed(
-                tmp_path,
-                cur_pocs=cur_pocs,
-                ref_pocs=ref_pocs,
-                pair_feats=pair_feats,
-                resize_width=np.int32(rw),
-                resize_height=np.int32(rh),
-                pair_block_size=np.int32(block_size),
-                changed_threshold=np.float32(changed_th),
-            )
+            np.savez_compressed(tmp_path, **save_payload)
             os.replace(tmp_path, str(out_path))
         except Exception:
             if os.path.exists(tmp_path):

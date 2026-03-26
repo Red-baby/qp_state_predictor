@@ -26,7 +26,13 @@ from .config import (
     resolve_train_override_cli_env,
 )
 from .datasets import FrameDataset, SegmentDataset
-from .features import pair_feature_names, pass1_feature_names, self_feature_names
+from .features import (
+    meta_feature_names,
+    pair_feature_names,
+    pass1_feature_names,
+    resolve_feature_profile,
+    self_feature_names,
+)
 from .manifest import build_manifest
 from .models import Phase1Net, Phase2Net, Phase2_1Net, Phase3Net
 from .utils import (
@@ -181,9 +187,10 @@ def split_manifest(manifest, cfg):
 
 
 def build_model(cfg: dict, phase: int):
-    self_dim = len(self_feature_names())
-    pair_dim = len(pair_feature_names())
-    meta_dim = 12
+    feature_profile = resolve_feature_profile(cfg, phase)
+    self_dim = len(self_feature_names(feature_profile))
+    pair_dim = len(pair_feature_names(feature_profile))
+    meta_dim = len(meta_feature_names(feature_profile))
     pass1_dim = len(pass1_feature_names(cfg)) if cfg["data"].get("use_pass1_features", False) else 0
     head_out = model_head_out_dim(cfg)
 

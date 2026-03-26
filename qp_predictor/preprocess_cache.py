@@ -9,7 +9,13 @@ import numpy as np
 from tqdm import tqdm
 
 from .config import load_config
-from .features import extract_self_features
+from .features import (
+    FEATURE_PROFILE_BITS,
+    FEATURE_PROFILE_LEGACY,
+    FEATURE_PROFILE_VMAF,
+    extract_self_features,
+    self_feature_storage_key,
+)
 from .manifest import build_manifest
 from .utils import ensure_dir
 from .yuvio import YUVReader420, resize_y
@@ -37,11 +43,25 @@ def main():
     filename_tmpl = data_cfg["yuv_filename_template"]
     yuv_root = Path(data_cfg["yuv_root"])
 
+    profiles = (
+        FEATURE_PROFILE_LEGACY,
+        FEATURE_PROFILE_BITS,
+        FEATURE_PROFILE_VMAF,
+    )
+    required_keys = {"y_lowres"} | {self_feature_storage_key(profile) for profile in profiles}
+
     for sequence, g in manifest.groupby("yuv_sequence"):
         out_path = cache_dir / f"{sequence}.npz"
         if out_path.exists():
-            print(f"[skip] cache exists: {out_path}")
-            continue
+            data = np.load(out_path, allow_pickle=False, mmap_mode="r")
+            try:
+                existing_keys = set(data.files)
+            finally:
+                data.close()
+            if required_keys.issubset(existing_keys):
+                print(f"[skip] cache exists: {out_path}")
+                continue
+            print(f"[rebuild] cache missing new feature keys: {out_path}")
 
         frame_ids = sorted(set(g["poc"].tolist()))
         max_poc = max(frame_ids)
@@ -49,27 +69,30 @@ def main():
         reader = YUVReader420(str(yuv_path), width=width, height=height, bit_depth=bit_depth)
 
         y_lowres = np.zeros((max_poc + 1, out_h, out_w), dtype=np.uint8)
-        self_features = None
+        self_buffers: dict[str, np.ndarray] = {}
 
         for poc in tqdm(frame_ids, desc=f"cache {sequence}"):
             y = reader.read_y(int(poc))
             y_small = resize_y(y, out_w=out_w, out_h=out_h)
-            feats = extract_self_features(
-                y_small,
-                block_size=int(feat_cfg["block_size"]),
-                entropy_bins=int(feat_cfg["entropy_bins"]),
-                edge_threshold=float(feat_cfg["edge_threshold"]),
-            )
-            if self_features is None:
-                self_features = np.zeros((max_poc + 1, feats.shape[0]), dtype=np.float32)
 
             y_lowres[poc] = y_small
-            self_features[poc] = feats.astype(np.float32)
+            for profile in profiles:
+                key = self_feature_storage_key(profile)
+                feats = extract_self_features(
+                    y_small,
+                    block_size=int(feat_cfg["block_size"]),
+                    entropy_bins=int(feat_cfg["entropy_bins"]),
+                    edge_threshold=float(feat_cfg["edge_threshold"]),
+                    feature_profile=profile,
+                )
+                if key not in self_buffers:
+                    self_buffers[key] = np.zeros((max_poc + 1, feats.shape[0]), dtype=np.float32)
+                self_buffers[key][poc] = feats.astype(np.float32)
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".npz", dir=str(cache_dir))
         os.close(tmp_fd)
         try:
-            np.savez_compressed(tmp_path, y_lowres=y_lowres, self_features=self_features)
+            np.savez_compressed(tmp_path, y_lowres=y_lowres, **self_buffers)
             os.replace(tmp_path, str(out_path))
         except Exception:
             if os.path.exists(tmp_path):
