@@ -298,24 +298,7 @@ def self_feature_names(feature_profile: str | None = None) -> List[str]:
 
 
 def meta_feature_names(feature_profile: str | None = None) -> List[str]:
-    profile = normalize_feature_profile(feature_profile)
-    if profile in (FEATURE_PROFILE_BITS, FEATURE_PROFILE_VMAF):
-        return [
-            "ft_I",
-            "ft_P",
-            "ft_B",
-            "ft_UNK",
-            "tl_0",
-            "tl_1",
-            "tl_2",
-            "tl_3",
-            "tl_4",
-            "tl_6",
-            "intra_period_pos",
-            "ref_distance_1",
-            "ref_distance_2",
-            "num_valid_refs",
-        ]
+    normalize_feature_profile(feature_profile)
     return [
         "tl_0",
         "tl_1",

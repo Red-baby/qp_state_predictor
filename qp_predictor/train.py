@@ -114,7 +114,6 @@ def train_metrics_stub_when_skip_full_train_eval(cfg: dict, train_log: dict) -> 
     """eval_full_train_each_epoch=false 时占位，避免 history 缺字段。"""
     base = {
         "loss": float(train_log["loss"]),
-        "by_frame_type": {},
         "by_temporal_layer": {},
         "model_mode": model_mode_tag(cfg),
         "_skipped_full_train_eval": True,
@@ -794,7 +793,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
     mse_pred_all = []
     vmaf_true_chunks: list[np.ndarray] = []
     vmaf_pred_chunks: list[np.ndarray] = []
-    frame_type_all = []
     temporal_layer_all = []
     sequence_all = []
 
@@ -808,13 +806,11 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
             pred = outputs["pred"]
             target = batch["target"]
             valid_mask = batch["valid_mask"] > 0.5
-            frame_type_ids = batch["frame_type_id"]
             temporal_layers = batch["temporal_layer"]
         else:
             pred = outputs["pred"]
             target = batch["targets"]
             valid_mask = batch["valid_loss_mask"] > 0.5
-            frame_type_ids = batch["frame_type_ids"]
             temporal_layers = batch["temporal_layers"]
 
         vm_np = valid_mask.detach().cpu().numpy()
@@ -834,7 +830,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
 
         pred = pred[valid_mask]
         target = target[valid_mask]
-        frame_type_ids = frame_type_ids[valid_mask].detach().cpu().numpy()
         temporal_layers = temporal_layers[valid_mask].detach().cpu().numpy()
 
         if is_double_mode(cfg) and double_target(cfg) == "bits":
@@ -842,7 +837,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
             bits_true = inverse_log_bits(target[:, 0]).detach().cpu().numpy()
             bits_true_all.append(bits_true)
             bits_pred_all.append(bits_pred)
-            frame_type_all.append(frame_type_ids)
             temporal_layer_all.append(temporal_layers)
             sequence_all.append(seq_np)
         elif is_double_mode(cfg) and double_target(cfg) == "distortion":
@@ -856,7 +850,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
                 mse_true = inverse_log_mse(target[:, 1]).detach().cpu().numpy()
                 mse_true_all.append(mse_true)
                 mse_pred_all.append(mse_pred)
-            frame_type_all.append(frame_type_ids)
             temporal_layer_all.append(temporal_layers)
             sequence_all.append(seq_np)
         else:
@@ -874,7 +867,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
                 mse_true = inverse_log_mse(target[:, 1]).detach().cpu().numpy()
                 mse_true_all.append(mse_true)
                 mse_pred_all.append(mse_pred)
-            frame_type_all.append(frame_type_ids)
             temporal_layer_all.append(temporal_layers)
             sequence_all.append(seq_np)
 
@@ -882,7 +874,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
     bits_pred_all = np.concatenate(bits_pred_all, axis=0) if bits_pred_all else np.zeros((0,))
     mse_true_all = np.concatenate(mse_true_all, axis=0) if mse_true_all else np.zeros((0,))
     mse_pred_all = np.concatenate(mse_pred_all, axis=0) if mse_pred_all else np.zeros((0,))
-    frame_type_all = np.concatenate(frame_type_all, axis=0) if frame_type_all else np.zeros((0,), dtype=np.int64)
     temporal_layer_all = np.concatenate(temporal_layer_all, axis=0) if temporal_layer_all else np.zeros((0,), dtype=np.int64)
     sequence_concat = np.concatenate(sequence_all, axis=0) if sequence_all else np.asarray([], dtype=object)
     vmaf_true_arr = np.concatenate(vmaf_true_chunks, axis=0) if vmaf_true_chunks else np.zeros((0,))
@@ -891,7 +882,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
     from .utils import compute_psnr_from_mse
 
     loss_f = float(np.mean(loss_meter)) if loss_meter else 0.0
-    ft_label = lambda x: {0: "I", 1: "P", 2: "B", 3: "UNK"}.get(x, f"UNK_{x}")
 
     if is_double_mode(cfg) and double_target(cfg) == "bits":
         mean_agg = {}
@@ -903,7 +893,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
             "bits": regression_metrics(bits_true_all, bits_pred_all) if len(bits_true_all) > 0 else {},
             "mse": {},
             "psnr": {},
-            "by_frame_type": _group_metrics_bits_only(bits_true_all, bits_pred_all, frame_type_all, label_fn=ft_label),
             "by_temporal_layer": _group_metrics_bits_only(
                 bits_true_all, bits_pred_all, temporal_layer_all, label_fn=lambda x: str(x)
             ),
@@ -922,9 +911,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
                 "loss": loss_f,
                 "mse_term": "vmaf",
                 "vmaf": regression_metrics(vmaf_true_arr, vmaf_pred_arr) if len(vmaf_true_arr) > 0 else {},
-                "by_frame_type": _group_metrics_vmaf_only(
-                    vmaf_true_arr, vmaf_pred_arr, frame_type_all, label_fn=ft_label
-                ),
                 "by_temporal_layer": _group_metrics_vmaf_only(
                     vmaf_true_arr, vmaf_pred_arr, temporal_layer_all, label_fn=lambda x: str(x)
                 ),
@@ -947,9 +933,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
             "bits": {},
             "mse": regression_metrics(mse_true_all, mse_pred_all) if len(mse_true_all) > 0 else {},
             "psnr": regression_metrics(psnr_true, psnr_pred) if len(psnr_true) > 0 else {},
-            "by_frame_type": _group_metrics_distortion_only(
-                mse_true_all, mse_pred_all, psnr_true, psnr_pred, frame_type_all, label_fn=ft_label
-            ),
             "by_temporal_layer": _group_metrics_distortion_only(
                 mse_true_all,
                 mse_pred_all,
@@ -975,14 +958,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
             "mse_term": "vmaf",
             "bits": regression_metrics(bits_true_all, bits_pred_all) if len(bits_true_all) > 0 else {},
             "vmaf": regression_metrics(vmaf_true_arr, vmaf_pred_arr) if len(vmaf_true_arr) > 0 else {},
-            "by_frame_type": _group_metrics_bits_vmaf(
-                bits_true_all,
-                bits_pred_all,
-                vmaf_true_arr,
-                vmaf_pred_arr,
-                frame_type_all,
-                label_fn=ft_label,
-            ),
             "by_temporal_layer": _group_metrics_bits_vmaf(
                 bits_true_all,
                 bits_pred_all,
@@ -1018,16 +993,6 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
         "bits": regression_metrics(bits_true_all, bits_pred_all) if len(bits_true_all) > 0 else {},
         "mse": regression_metrics(mse_true_all, mse_pred_all) if len(mse_true_all) > 0 else {},
         "psnr": regression_metrics(psnr_true, psnr_pred) if len(psnr_true) > 0 else {},
-        "by_frame_type": _group_metrics(
-            bits_true_all,
-            bits_pred_all,
-            mse_true_all,
-            mse_pred_all,
-            psnr_true,
-            psnr_pred,
-            frame_type_all,
-            label_fn=ft_label,
-        ),
         "by_temporal_layer": _group_metrics(
             bits_true_all,
             bits_pred_all,
@@ -1161,24 +1126,16 @@ def format_eval_metrics_block(name: str, metrics: dict) -> str:
         if key in metrics and metrics[key]:
             lines.append(f"           {_fmt_reg_line(key, metrics[key])}")
 
-    for block_title, key in (
-        ("按帧类型", "by_frame_type"),
-        ("按时域层 TL", "by_temporal_layer"),
-    ):
-        sub = metrics.get(key) or {}
-        if not sub:
-            continue
-        lines.append(f"           -- {block_title} --")
+    sub = metrics.get("by_temporal_layer") or {}
+    if sub:
+        lines.append("           -- Temporal Layer TL --")
 
         def sort_key(item):
             label, _ = item
-            order = {"I": 0, "P": 1, "B": 2}
-            if label in order:
-                return (0, order[label])
             try:
-                return (1, int(label))
+                return (0, int(label))
             except ValueError:
-                return (2, label)
+                return (1, label)
 
         if vmaf_pure:
             header = f"           {'subset':<8} {'n':>7} | {'vmaf_RMSE':>12} {'vmaf_R2':>8}"

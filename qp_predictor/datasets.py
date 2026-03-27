@@ -19,7 +19,7 @@ from .features import (
 )
 from .graph import build_segment_topo_order
 from .pair_cache import PairCacheManager
-from .utils import frame_type_onehot, frame_type_to_id, normalize_qp, temporal_layer_onehot
+from .utils import normalize_qp, temporal_layer_onehot
 
 _PAIR_FALLBACK_WARNED = False
 _SELF_FALLBACK_WARNED: set[str] = set()
@@ -72,20 +72,7 @@ def build_meta_vector(row: pd.Series, i_interval: int, feature_profile: str = "l
     intra_period_pos = float(np.clip(intra_period_pos, 0.0, 1.0))
     ref_d1 = float(row["ref_distance_1"]) / max(segment_span, 1) if int(row["ref_distance_1"]) >= 0 else -1.0
     ref_d2 = float(row["ref_distance_2"]) / max(segment_span, 1) if int(row["ref_distance_2"]) >= 0 else -1.0
-    if str(feature_profile).lower().strip() in ("bits", "vmaf"):
-        frame_oh = frame_type_onehot(str(row["frame_type"]))
-        num_valid_refs = float((int(row["ref_poc_1"]) >= 0) + (int(row["ref_poc_2"]) >= 0)) / 2.0
-        vec = np.concatenate([
-            frame_oh,
-            tl_oh,
-            np.asarray([
-                intra_period_pos,
-                ref_d1,
-                ref_d2,
-                num_valid_refs,
-            ], dtype=np.float32),
-        ], axis=0)
-        return vec.astype(np.float32)
+    _ = str(feature_profile).lower().strip()
     vec = np.concatenate([
         tl_oh,
         np.asarray([
@@ -221,7 +208,6 @@ class FrameDataset(Dataset):
             "meta_feats": torch.from_numpy(meta),
             "qp": torch.from_numpy(qp),
             "target": torch.from_numpy(target),
-            "frame_type_id": torch.tensor(frame_type_to_id(str(row["frame_type"])), dtype=torch.long),
             "temporal_layer": torch.tensor(int(row["temporal_layer"]), dtype=torch.long),
             "valid_mask": torch.tensor(float(row["valid_train"]), dtype=torch.float32),
             "base_uid": str(row["base_uid"]),
@@ -352,7 +338,6 @@ class SegmentDataset(Dataset):
         valid_loss_mask = np.zeros((T,), dtype=np.float32)
         ref_idx = -np.ones((T, 2), dtype=np.int64)
         pair_feats = np.zeros((T, 2, self._pair_dim), dtype=np.float32)
-        frame_type_ids = np.zeros((T,), dtype=np.int64)
         temporal_layers = -np.ones((T,), dtype=np.int64)
         if self._use_pass1:
             pass1_feats = np.zeros((T, self._pass1_dim), dtype=np.float32)
@@ -374,7 +359,6 @@ class SegmentDataset(Dataset):
             else:
                 targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
             valid_loss_mask[t] = float(row["valid_train"])
-            frame_type_ids[t] = frame_type_to_id(str(row["frame_type"]))
             temporal_layers[t] = int(row["temporal_layer"])
             if self._use_pass1:
                 pass1_feats[t] = build_pass1_vector(row, self.cfg)
@@ -420,7 +404,6 @@ class SegmentDataset(Dataset):
             "valid_loss_mask": torch.from_numpy(valid_loss_mask),
             "ref_idx": torch.from_numpy(ref_idx),
             "pair_feats": torch.from_numpy(pair_feats),
-            "frame_type_ids": torch.from_numpy(frame_type_ids),
             "temporal_layers": torch.from_numpy(temporal_layers),
             "topo_order": torch.from_numpy(topo_order),
             "segment_uid": str(g.iloc[0]["segment_uid"]),

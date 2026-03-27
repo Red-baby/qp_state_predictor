@@ -12,14 +12,12 @@ TEMPORAL_LAYER_BUCKETS: tuple[int, ...] = (0, 1, 2, 3, 4, 6)
 
 
 def qp_norm_span(data_cfg: dict) -> float:
-    """QP 线性缩放到约 [0,1] 所用的区间长度 max(qp_norm_max - qp_norm_min, eps)。"""
     lo = float(data_cfg.get("qp_norm_min", 30))
     hi = float(data_cfg.get("qp_norm_max", 255))
     return max(hi - lo, 1e-6)
 
 
 def normalize_qp(q: float | int, data_cfg: dict) -> float:
-    """将 QP 按 data.qp_norm_min / qp_norm_max 做 min-max 归一化（默认 30～255）。"""
     lo = float(data_cfg.get("qp_norm_min", 30))
     return (float(q) - lo) / qp_norm_span(data_cfg)
 
@@ -85,7 +83,13 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, floa
     }
 
 
-def train_val_test_split(items: List[str], train_ratio: float, val_ratio: float, test_ratio: float, seed: int) -> Tuple[List[str], List[str], List[str]]:
+def train_val_test_split(
+    items: List[str],
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    seed: int,
+) -> Tuple[List[str], List[str], List[str]]:
     assert abs((train_ratio + val_ratio + test_ratio) - 1.0) < 1e-6
     uniq = list(sorted(set(items)))
     rnd = random.Random(seed)
@@ -105,7 +109,6 @@ def train_val_test_split(items: List[str], train_ratio: float, val_ratio: float,
     val_items = uniq[n_train : n_train + n_val]
     test_items = uniq[n_train + n_val :]
 
-    # round() 在序列数较少时常把 val/test 划成 0，导致验证集为空或指标无意义；在可能时补出非空划分
     if n >= 2 and len(val_items) == 0 and len(train_items) > 1:
         val_items = [train_items.pop()]
     if n >= 3 and len(test_items) == 0 and len(train_items) > 1:
@@ -140,9 +143,6 @@ def frame_type_onehot(frame_type: str) -> np.ndarray:
 
 def temporal_layer_onehot(temporal_layer: int) -> np.ndarray:
     layer = int(temporal_layer)
-    # 兼容旧模板里的 TL5，将其并入最高层桶。
-    if layer == 5:
-        layer = 6
     arr = np.zeros(len(TEMPORAL_LAYER_BUCKETS), dtype=np.float32)
     if layer in TEMPORAL_LAYER_BUCKETS:
         arr[TEMPORAL_LAYER_BUCKETS.index(layer)] = 1.0
@@ -156,7 +156,6 @@ def compute_psnr_from_mse(mse, max_value: float = 255.0):
 
 
 def compute_psnr_from_mse_torch(mse: torch.Tensor, max_value: float = 255.0) -> torch.Tensor:
-    """与 ``compute_psnr_from_mse`` 一致，供训练图中反传使用。"""
     mse = mse.clamp(min=1e-8)
     return 10.0 * torch.log10((max_value ** 2) / mse)
 
