@@ -15,6 +15,7 @@ from .features import (
     pair_feature_names,
     pass1_feature_names,
     resolve_feature_profile,
+    resolve_phase3_pair_profile,
     self_feature_storage_key,
 )
 from .graph import build_segment_topo_order
@@ -123,11 +124,10 @@ class FrameDataset(Dataset):
         for _, r in self.df.iterrows():
             self._qp_lookup[(str(r["segment_uid"]), int(r["poc"]))] = float(r["qp"])
 
-        self._use_pass1 = bool(cfg["data"].get("use_pass1_features", False))
-        self._pass1_dim = len(pass1_feature_names(cfg)) if self._use_pass1 else 0
+        self._pass1_dim = len(pass1_feature_names(cfg))
 
         self._row_lookup = {}
-        if self.phase == 2 and self._use_pass1:
+        if self.phase == 2:
             for _, r in self.df.iterrows():
                 self._row_lookup[(str(r["segment_uid"]), int(r["poc"]))] = r
 
@@ -214,8 +214,7 @@ class FrameDataset(Dataset):
             "sequence": str(row["sequence"]),
         }
 
-        if self._use_pass1:
-            out["pass1_feats"] = torch.from_numpy(build_pass1_vector(row, self.cfg))
+        out["pass1_feats"] = torch.from_numpy(build_pass1_vector(row, self.cfg))
 
         if self.phase == 2:
             pair_feats_all = []
@@ -255,21 +254,18 @@ class FrameDataset(Dataset):
                         ref_qp = self._qp_lookup.get((seg_uid, ref_poc), float(row["qp"]))
                     ref_valid = 1.0
 
-                    if self._use_pass1:
-                        ref_row = self._row_lookup.get((seg_uid, ref_poc))
-                        ref_p1 = (
-                            build_pass1_vector(ref_row, self.cfg)
-                            if ref_row is not None
-                            else np.zeros(self._pass1_dim, dtype=np.float32)
-                        )
-                    else:
-                        ref_p1 = None
+                    ref_row = self._row_lookup.get((seg_uid, ref_poc))
+                    ref_p1 = (
+                        build_pass1_vector(ref_row, self.cfg)
+                        if ref_row is not None
+                        else np.zeros(self._pass1_dim, dtype=np.float32)
+                    )
                 else:
                     ref_self_feats = np.zeros_like(self_feats, dtype=np.float32)
                     pair_feats = np.zeros(self._pair_dim, dtype=np.float32)
                     ref_qp = 0.0
                     ref_valid = 0.0
-                    ref_p1 = np.zeros(self._pass1_dim, dtype=np.float32) if self._use_pass1 else None
+                    ref_p1 = np.zeros(self._pass1_dim, dtype=np.float32)
 
                 pair_feats_all.append(pair_feats.astype(np.float32))
                 ref_feats_all.append(ref_self_feats.astype(np.float32))
@@ -278,8 +274,7 @@ class FrameDataset(Dataset):
                 else:
                     ref_qps_all.append([0.0])
                 ref_valid_all.append(ref_valid)
-                if ref_p1 is not None:
-                    ref_pass1_all.append(ref_p1)
+                ref_pass1_all.append(ref_p1)
 
             out.update({
                 "ref_feats": torch.from_numpy(np.stack(ref_feats_all, axis=0)),
@@ -287,8 +282,7 @@ class FrameDataset(Dataset):
                 "ref_qps": torch.from_numpy(np.asarray(ref_qps_all, dtype=np.float32)),
                 "ref_valid_mask": torch.from_numpy(np.asarray(ref_valid_all, dtype=np.float32)),
             })
-            if self._use_pass1 and ref_pass1_all:
-                out["ref_pass1_feats"] = torch.from_numpy(np.stack(ref_pass1_all, axis=0))
+            out["ref_pass1_feats"] = torch.from_numpy(np.stack(ref_pass1_all, axis=0))
 
         return out
 
@@ -300,15 +294,17 @@ class SegmentDataset(Dataset):
         self.block_size = int(cfg["features"]["pair_block_size"])
         self.changed_threshold = float(cfg["features"]["changed_threshold"])
         self.cache_manager = CacheManager(cfg["data"]["cache_dir"])
-        self._pair_dim = len(pair_feature_names())
+        self._pair_feature_profile = resolve_phase3_pair_profile(cfg)
+        self._pair_dim = len(pair_feature_names(self._pair_feature_profile))
 
-        self._use_pass1 = bool(cfg["data"].get("use_pass1_features", False))
-        self._pass1_dim = len(pass1_feature_names(cfg)) if self._use_pass1 else 0
+        self._pass1_dim = len(pass1_feature_names(cfg))
 
         feat_cfg = cfg["features"]
         self._use_pair_cache = bool(feat_cfg.get("use_pair_cache", False))
         self._pair_fallback = bool(feat_cfg.get("pair_cache_fallback_online", True))
-        self._pair_cache = PairCacheManager(cfg) if self._use_pair_cache else None
+        self._pair_cache = (
+            PairCacheManager(cfg, feature_profile=self._pair_feature_profile) if self._use_pair_cache else None
+        )
 
         seg_groups = []
         for seg_uid, g in split_df.groupby("segment_uid"):
@@ -339,8 +335,7 @@ class SegmentDataset(Dataset):
         ref_idx = -np.ones((T, 2), dtype=np.int64)
         pair_feats = np.zeros((T, 2, self._pair_dim), dtype=np.float32)
         temporal_layers = -np.ones((T,), dtype=np.int64)
-        if self._use_pass1:
-            pass1_feats = np.zeros((T, self._pass1_dim), dtype=np.float32)
+        pass1_feats = np.zeros((T, self._pass1_dim), dtype=np.float32)
 
         row_by_local = {int(r["local_poc"]): r for _, r in g.iterrows()}
 
@@ -360,8 +355,7 @@ class SegmentDataset(Dataset):
                 targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
             valid_loss_mask[t] = float(row["valid_train"])
             temporal_layers[t] = int(row["temporal_layer"])
-            if self._use_pass1:
-                pass1_feats[t] = build_pass1_vector(row, self.cfg)
+            pass1_feats[t] = build_pass1_vector(row, self.cfg)
 
         local_to_poc = {int(r["local_poc"]): int(r["poc"]) for _, r in g.iterrows()}
         poc_to_local = {v: k for k, v in local_to_poc.items()}
@@ -390,6 +384,7 @@ class SegmentDataset(Dataset):
                             ref_y,
                             block_size=self.block_size,
                             changed_threshold=self.changed_threshold,
+                            feature_profile=self._pair_feature_profile,
                         )
                     else:
                         raise RuntimeError(
@@ -409,6 +404,5 @@ class SegmentDataset(Dataset):
             "segment_uid": str(g.iloc[0]["segment_uid"]),
             "sequence": str(g.iloc[0]["sequence"]),
         }
-        if self._use_pass1:
-            result["pass1_feats"] = torch.from_numpy(pass1_feats)
+        result["pass1_feats"] = torch.from_numpy(pass1_feats)
         return result

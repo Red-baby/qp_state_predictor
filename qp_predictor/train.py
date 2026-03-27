@@ -31,6 +31,7 @@ from .features import (
     pair_feature_names,
     pass1_feature_names,
     resolve_feature_profile,
+    resolve_phase3_pair_profile,
     self_feature_names,
 )
 from .manifest import build_manifest
@@ -150,7 +151,7 @@ def _double_mode_dir_suffix(cfg: dict) -> str:
 
 
 def phase_output_dirname(cfg: dict, phase: int) -> str:
-    """输出目录名：phase{N} + pass1/no_pass1 后缀 + 单头失真后缀 或 double 后缀。"""
+    """输出目录名：phase{N} + _pass1 + 单头失真后缀 或 double 后缀。"""
     base = f"phase{phase}"
     if phase == 2:
         v = phase2_variant(cfg)
@@ -163,11 +164,7 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
         dist_suf = _double_mode_dir_suffix(cfg)
     else:
         dist_suf = _distortion_loss_dir_suffix(cfg)
-    if data_cfg.get("use_pass1_features", False):
-        suf = str(data_cfg.get("output_phase_pass1_suffix", "_pass1"))
-        return f"{base}{suf}{dist_suf}"
-    suf = str(data_cfg.get("output_phase_no_pass1_suffix", "") or "")
-    return f"{base}{suf}{dist_suf}"
+    return f"{base}_pass1{dist_suf}"
 
 
 def split_manifest(manifest, cfg):
@@ -188,9 +185,12 @@ def split_manifest(manifest, cfg):
 def build_model(cfg: dict, phase: int):
     feature_profile = resolve_feature_profile(cfg, phase)
     self_dim = len(self_feature_names(feature_profile))
-    pair_dim = len(pair_feature_names(feature_profile))
+    if phase == 3:
+        pair_dim = len(pair_feature_names(resolve_phase3_pair_profile(cfg)))
+    else:
+        pair_dim = len(pair_feature_names(feature_profile))
     meta_dim = len(meta_feature_names(feature_profile))
-    pass1_dim = len(pass1_feature_names(cfg)) if cfg["data"].get("use_pass1_features", False) else 0
+    pass1_dim = len(pass1_feature_names(cfg))
     head_out = model_head_out_dim(cfg)
 
     if phase == 1:

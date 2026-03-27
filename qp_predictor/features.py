@@ -40,6 +40,16 @@ def resolve_feature_profile(cfg: Optional[dict], phase: Optional[int] = None) ->
     return FEATURE_PROFILE_LEGACY
 
 
+def resolve_phase3_pair_profile(cfg: Optional[dict]) -> str:
+    """Phase 3 目前只在 mse_term=vmaf 时升级 pair profile；self/meta 仍保持 legacy。"""
+    if cfg is None:
+        return FEATURE_PROFILE_LEGACY
+    mse_term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
+    if mse_term == "vmaf":
+        return FEATURE_PROFILE_VMAF
+    return FEATURE_PROFILE_LEGACY
+
+
 def self_feature_storage_key(feature_profile: str | None = None) -> str:
     profile = normalize_feature_profile(feature_profile)
     if profile == FEATURE_PROFILE_BITS:

@@ -48,17 +48,14 @@ data:
   qp_norm_min: 30
   qp_norm_max: 255
 
-  # pass1 先验特征（来自 CSV，不来自 YUV）
-  use_pass1_features: false
-  pass1_columns:
-    qp: "pass1_qp"
-    bits: "pass1_bits"
-    mse: "pass1_mse"
-    psnr: "pass1_psnr"
+  # loss.mse_term=vmaf 时必填：CSV 中作为监督标签的 VMAF 列，例如 "pass2_vmaf"
+  vmaf_col: null
 
-  # 训练输出目录 = output_root / (phase{N} + 后缀)；single 时另追加 _logmse/_psnr；double 时追加 _double_bits/_double_psnr/_double_mse（见 model.mode）
-  output_phase_no_pass1_suffix: ""
-  output_phase_pass1_suffix: "_pass1"
+  # pass1 先验特征默认启用，列名默认读取：
+  #   pass1_qp / pass1_bits / pass1_mse / pass1_psnr / pass1_vmaf
+  pass1_vmaf_norm_div: 100.0
+
+  # 训练输出目录固定为 phase{N}_pass1 + 失真后缀；single 时再追加 _logmse/_psnr/_vmaf，double 时追加 _double_bits/_double_psnr/_double_mse/_double_vmaf
 
 features:
   block_size: 8
@@ -77,7 +74,8 @@ train:
   epochs: 40
   batch_size_phase1: 256
   batch_size_phase2: 256
-  batch_size_phase3: 8
+  # Phase3：当前实现要求 batch 内 topo_order 完全一致；通用安全配置请设为 1
+  batch_size_phase3: 1
   lr: 1.0e-3
   weight_decay: 1.0e-5
   huber_delta: 0.2
@@ -90,13 +88,16 @@ loss:
   bits_weight: 1.0
   mse_weight: 1.0
   aux_weight: 0.3
-  # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber；delta 自动 = train.huber_delta * huber_delta_psnr_scale，默认×5）
-  # 可选：huber_delta_psnr 指定绝对 dB 阈值；不设则用 scale
+  # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber）| vmaf（直接回归 VMAF）
+  # 可选：huber_delta_psnr / huber_delta_vmaf 指定绝对阈值；不设则用对应 scale
   mse_term: "log_mse"
   huber_delta_psnr: null
   huber_delta_psnr_scale: 5.0
+  huber_delta_vmaf: null
+  huber_delta_vmaf_scale: 2.0
 
 # 训练：python -m qp_predictor.train --config ... --phase 1 --model-mode single --mse-term psnr
+# VMAF 例子：python -m qp_predictor.train --config ... --phase 2 --model-mode double --double-target distortion --mse-term vmaf
 # 或环境变量 QP_TRAIN_MODEL_MODE / QP_TRAIN_DOUBLE_TARGET / QP_TRAIN_MSE_TERM
 model:
   mode: "single"

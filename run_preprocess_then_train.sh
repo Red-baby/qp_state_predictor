@@ -83,4 +83,4 @@ run_train_phase 2
 run_train_phase 3
 
 log "All steps finished successfully."
-log "Checkpoints: under data.output_root, e.g. phase1/ or phase1_pass1/ when use_pass1_features=true (see train.phase_output_dirname)."
+log "Checkpoints: under data.output_root, e.g. phase1_pass1_logmse/ or phase2_pass1_double_vmaf/ (see train.phase_output_dirname)."

@@ -152,11 +152,11 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
     segment_keys = set(zip(df["segment_uid"], df[poc_col]))
     for ref_col in ("ref_poc_1", "ref_poc_2"):
         has_ref = df[ref_col] >= 0
-        ref_ok = pd.Series(True, index=df.index)
-        ref_ok.loc[has_ref] = [
+        ref_ok = pd.Series(True, index=df.index, dtype=bool)
+        ref_ok.loc[has_ref] = np.asarray([
             (seg_uid, int(ref_poc)) in segment_keys
             for seg_uid, ref_poc in zip(df.loc[has_ref, "segment_uid"], df.loc[has_ref, ref_col])
-        ]
+        ], dtype=bool)
         df.loc[has_ref & (~ref_ok), "valid_train"] = 0
 
     df["sequence"] = df[seq_col]
@@ -188,48 +188,46 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
             raise ValueError(f"CSV 缺少 VMAF 列 {vcol!r}（loss.mse_term=vmaf 需要该列作为失真标签）。")
         df["vmaf"] = df[vcol].astype(float)
 
-    if data_cfg.get("use_pass1_features", False):
-        p1cols = data_cfg.get("pass1_columns", {})
-        p1_qp_col = p1cols.get("qp")
-        p1_bits_col = p1cols.get("bits")
-        p1_mse_col = p1cols.get("mse")
-        p1_psnr_col = p1cols.get("psnr")
-        p1_vmaf_col = p1cols.get("vmaf")
+    p1cols = data_cfg.get("pass1_columns", {})
+    p1_qp_col = p1cols.get("qp") or "pass1_qp"
+    p1_bits_col = p1cols.get("bits") or "pass1_bits"
+    p1_mse_col = p1cols.get("mse") or "pass1_mse"
+    p1_psnr_col = p1cols.get("psnr") or "pass1_psnr"
+    p1_vmaf_col = p1cols.get("vmaf") or "pass1_vmaf"
 
-        if mse_term == "vmaf":
-            vmaf_pass1_col = p1_vmaf_col or "pass1_vmaf"
-            needed = [c for c in (p1_qp_col, p1_bits_col, vmaf_pass1_col) if c]
-            missing = [c for c in needed if c not in df.columns]
-            if missing:
-                raise ValueError(
-                    f"use_pass1_features=true 且 loss.mse_term=vmaf 时，CSV 必须包含 pass1 列 {missing}。"
-                )
-        else:
-            needed = [c for c in (p1_qp_col, p1_bits_col, p1_mse_col) if c]
-            missing = [c for c in needed if c not in df.columns]
-            if missing:
-                raise ValueError(f"use_pass1_features=true 但 CSV 缺少 pass1 列 {missing}。")
+    if mse_term == "vmaf":
+        needed = [p1_qp_col, p1_bits_col, p1_vmaf_col]
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"当前实现默认使用 pass1 特征；loss.mse_term=vmaf 时，CSV 必须包含 pass1 列 {missing}。"
+            )
+    else:
+        needed = [p1_qp_col, p1_bits_col, p1_mse_col]
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise ValueError(f"当前实现默认使用 pass1 特征；CSV 缺少 pass1 列 {missing}。")
 
-        if p1_qp_col and p1_qp_col in df.columns:
-            df["pass1_qp"] = df[p1_qp_col].astype(float)
-        if p1_bits_col and p1_bits_col in df.columns:
-            df["pass1_bits"] = df[p1_bits_col].astype(float)
-        if mse_term == "vmaf":
-            df["pass1_vmaf"] = df[vmaf_pass1_col].astype(float)
-            if p1_mse_col and p1_mse_col in df.columns:
-                df["pass1_mse"] = df[p1_mse_col].astype(float)
-            else:
-                df["pass1_mse"] = 0.0
-        elif p1_mse_col and p1_mse_col in df.columns:
+    df["pass1_qp"] = df[p1_qp_col].astype(float)
+    df["pass1_bits"] = df[p1_bits_col].astype(float)
+    if mse_term == "vmaf":
+        df["pass1_vmaf"] = df[p1_vmaf_col].astype(float)
+        if p1_mse_col in df.columns:
             df["pass1_mse"] = df[p1_mse_col].astype(float)
-        if p1_psnr_col and p1_psnr_col in df.columns:
-            df["pass1_psnr"] = df[p1_psnr_col].astype(float)
+        else:
+            df["pass1_mse"] = 0.0
+    else:
+        df["pass1_mse"] = df[p1_mse_col].astype(float)
+        if p1_vmaf_col in df.columns:
+            df["pass1_vmaf"] = df[p1_vmaf_col].astype(float)
+    if p1_psnr_col in df.columns:
+        df["pass1_psnr"] = df[p1_psnr_col].astype(float)
 
-        df["pass1_log_bits"] = np.log1p(df["pass1_bits"].values.astype(np.float64)).astype(np.float32)
-        df["pass1_log_mse"] = np.log(df["pass1_mse"].values.astype(np.float64) + 1e-6).astype(np.float32)
-        df["pass1_delta_qp"] = (
-            (df[qp_col].values - df["pass1_qp"].values) / qp_norm_span(data_cfg)
-        ).astype(np.float32)
+    df["pass1_log_bits"] = np.log1p(df["pass1_bits"].values.astype(np.float64)).astype(np.float32)
+    df["pass1_log_mse"] = np.log(df["pass1_mse"].values.astype(np.float64) + 1e-6).astype(np.float32)
+    df["pass1_delta_qp"] = (
+        (df[qp_col].values - df["pass1_qp"].values) / qp_norm_span(data_cfg)
+    ).astype(np.float32)
 
     drop_cols = [
         "template_frame_type",

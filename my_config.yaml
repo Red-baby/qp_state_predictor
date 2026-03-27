@@ -49,24 +49,15 @@ data:
   qp_norm_min: 30
   qp_norm_max: 255
 
-  # pass1 先验特征（来自 CSV）；启用后模型输入多 4 维 pass1 向量
-  use_pass1_features: true
-  pass1_columns:
-    qp: "pass1_qp"
-    bits: "pass1_bits"
-    mse: "pass1_mse"
-    psnr: "pass1_psnr"
-    # loss.mse_term=vmaf 时作为网络输入第 3 维（见 pass1_vmaf_norm_div）；列名默认可不填
-    vmaf: "pass1_vmaf"
+  # pass1 先验特征默认启用，列名默认读取：
+  #   pass1_qp / pass1_bits / pass1_mse / pass1_psnr / pass1_vmaf
 
   # CSV 列为 pass1_vmaf / pass2_vmaf；mse_term=vmaf 时仅 vmaf_col 指向的那一列作为监督标签
   vmaf_col: "pass2_vmaf" # 改 "pass1_vmaf" 则用第一遍编码段 VMAF 作标签
 
-  # 输出目录名 = phase{N} + pass1 后缀 + 后缀：
+  # 输出目录名固定为 phase{N}_pass1 + 后缀：
   #   model.mode=single：+ _logmse | _psnr | _vmaf（由 loss.mse_term）
   #   model.mode=double：+ _double_bits | _double_psnr | _double_mse | _double_vmaf
-  output_phase_no_pass1_suffix: ""
-  output_phase_pass1_suffix: "_pass1"
 
 features:
   block_size: 8

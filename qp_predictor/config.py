@@ -58,17 +58,13 @@ DEFAULT_CONFIG = {
         "qp_norm_max": 255,
         # loss.mse_term=vmaf 时必填：CSV 中 VMAF 标签列名（如 pass2_vmaf）
         "vmaf_col": None,
-        "use_pass1_features": False,
-        # 训练输出：phase{N} + 下列后缀 + 由 loss.mse_term 自动追加 _logmse 或 _psnr（见 train.phase_output_dirname）
-        "output_phase_no_pass1_suffix": "",
-        "output_phase_pass1_suffix": "_pass1",
         "pass1_columns": {
-            "qp": None,
-            "bits": None,
-            "mse": None,
-            "psnr": None,
-            # loss.mse_term=vmaf 时作为 pass1 向量第 3 维（默认列名 pass1_vmaf）
-            "vmaf": None,
+            "qp": "pass1_qp",
+            "bits": "pass1_bits",
+            "mse": "pass1_mse",
+            "psnr": "pass1_psnr",
+            # loss.mse_term=vmaf 时作为 pass1 向量第 3 维
+            "vmaf": "pass1_vmaf",
         },
         # pass1 VMAF 输入归一化：pass1_vmaf / pass1_vmaf_norm_div（与 qp 归一化同量级）
         "pass1_vmaf_norm_div": 100.0,

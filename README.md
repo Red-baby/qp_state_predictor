@@ -1,10 +1,11 @@
-# QP-conditioned frame bits / PSNR predictor
+# QP-conditioned frame bits / distortion predictor
 
 这是一套完整的 PyTorch 工程代码，用于在固定 GOP16 + I-interval=125 的结构下，
 根据当前帧 / 参考帧的原始 Y 特征、QP、层级与参考关系，预测当前帧的：
 
 - `bits`
 - `MSE_Y`
+- `VMAF`
 - `PSNR_Y`
 
 同时包含 3 个阶段：
@@ -28,14 +29,13 @@
 
 本工程的做法是：
 
-- 训练时：真实 `bits/mse/psnr` 仅用于监督
+- 训练时：真实 `bits/mse/psnr/vmaf` 仅用于监督
 - 推理时：只使用模型预测出来的参考状态 `z_r`
 
 ### 可以 batch 训练
 - Phase 1 / 2：按帧 batch
-- Phase 3：按 **segment** batch（例如 `[B, T, ...]`，T=125）
-  - 每个 batch 内部仍按固定拓扑顺序递推 `z_t`
-  - 但是多个 segment 可以并行组成 batch
+- Phase 3：按 **segment** batch（例如 `[B, T, ...]`，T=125），但同一 segment 内部仍按 `topo_order` 递推 `z_t`，不是帧独立并行
+- 当前实现只允许 **topo_order 完全一致** 的 segment 组成同一 Phase 3 batch；否则会在运行时直接报错。通用安全配置是 `train.batch_size_phase3=1`
 
 ---
 
@@ -91,14 +91,16 @@
 
 那么代码会直接用你的真实参考关系。
 
-### 默认：只训练“完整 16 结构块”中的帧
+### 默认：按真实尾长构建“缩短版尾 GOP”
 如果没有显式 ref 列，代码会：
 
-- 对 `0~112` 按固定 GOP16 结构自动推断参考
-- 对 `113~124` 置 `valid_train=0`
-- 这些尾部帧不会参与训练 / 验证损失
+- 对完整的 `GOP16` 区间按固定结构自动推断参考
+- 对尾部残余帧按真实尾长构建缩短版结构
+  - 尾长较短时退化为 `P` 链
+  - 尾长足够时构建缩短版层次 B 结构
+- 只有模板里不存在的节点，或参考帧落到当前 segment 外部时，才会把该帧置为 `valid_train=0`
 
-这样更安全，不会错误假设参考关系。
+所以当前实现**不会**再把 `113~124` 一律排除；这组帧在 `I-interval=125` 下通常仍可参与训练。
 
 ---
 
@@ -223,7 +225,9 @@ python -m qp_predictor.eval --config my_config.yaml --phase 3 --checkpoint outpu
 
 输出：
 - `log(1+bits)`
-- `log(mse+eps)`
+- 第二维失真项由 `loss.mse_term` 决定：
+  - `log_mse/psnr` 模式下内部仍以 `log(mse)` 表示
+  - `vmaf` 模式下直接回归 `VMAF`
 
 ### Phase 2
 输入：
@@ -236,14 +240,23 @@ python -m qp_predictor.eval --config my_config.yaml --phase 3 --checkpoint outpu
 
 输出同上。
 
+补充：
+- 当 `model.mode=double`、`model.double_target=distortion` 且 `loss.mse_term=vmaf` 时，Phase 2 会切到 VMAF 专用 self/pair 特征 profile
+- 其他配置仍使用 legacy self/pair 特征
+
 ### Phase 3
 输入仍然**不包含真实参考编码结果**，但模型内部维护预测状态 `z_t`：
 
 - `u_t = self_encoder(self_feats, qp, meta)`
 - 从参考帧的 `u_r, z_r, pair_feats` 生成 edge/context
 - 得到当前帧预测状态 `z_t`
-- 主头预测当前帧 `bits/mse`
-- 辅助头从 `z_t` 预测该帧的 `bits/mse`，用于训练时监督 `z_t` 真正携带“编码质量状态”
+- 主头预测当前帧 `bits/失真项`
+- 辅助头从 `z_t` 预测该帧的 `bits/失真项`，用于训练时监督 `z_t` 真正携带“编码质量状态”
+
+当前边界：
+- Phase 3 已支持 `loss.mse_term=vmaf` 的目标、loss 和评估输出
+- Phase 3 当前仍读取 legacy `self_features`；但在 `mse_term=vmaf` 时，`pair_feats` 已切到与 Phase 2 VMAF 路径一致的 VMAF pair profile
+- pass1 先验当前默认启用；`vmaf` 模式下 `pass1` 向量第 3 维会切到 `pass1_vmaf`
 
 ---
 
@@ -284,6 +297,26 @@ explicit_ref_columns:
 
 如果没有，就保持 `null`。
 
+### `vmaf_col`
+当 `loss.mse_term: "vmaf"` 时必须填写，用来指定 CSV 里的 VMAF 标签列，例如：
+
+```yaml
+data:
+  vmaf_col: "pass2_vmaf"
+```
+
+pass1 先验默认读取这些列：`pass1_qp`、`pass1_bits`、`pass1_mse`、`pass1_psnr`、`pass1_vmaf`。通常不需要再在 config 里单独开关。
+
+### `batch_size_phase3`
+当前实现要求同一 batch 内各 segment 的 `topo_order` 完全一致；否则会报错。
+
+通用安全配置：
+
+```yaml
+train:
+  batch_size_phase3: 1
+```
+
 ---
 
 ## 9. 输出
@@ -314,8 +347,9 @@ outputs/
 ## 10. 备注
 
 1. 这套代码默认针对 **8-bit YUV420**
-2. 默认目标为 `bits` 和 `MSE_Y`
-3. `PSNR_Y` 在评估时由预测的 `MSE_Y` 计算
-4. 若你的标签表只有“一次真实编码”的每帧结果，而没有同一帧多 QP 的多版本数据，本工程仍能训练，但“给任意候选 QP 做外插”的可靠性会受限。最理想仍然是：
+2. 默认目标为 `bits` 和失真项；失真项可选 `log_mse`、`psnr` 或 `vmaf`
+3. `PSNR_Y` 在非 `vmaf` 模式下由预测的 `MSE_Y` 反算得到
+4. 当前 VMAF 专用 self/pair 特征只在 `Phase 2 + double distortion + vmaf` 这条路径启用；`Phase 3` 虽支持 VMAF 监督，但特征仍是 legacy profile
+5. 若你的标签表只有“一次真实编码”的每帧结果，而没有同一帧多 QP 的多版本数据，本工程仍能训练，但“给任意候选 QP 做外插”的可靠性会受限。最理想仍然是：
    - 同一内容 / 同一帧
    - 覆盖多个 QP 或多种编码决策样本
