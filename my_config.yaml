@@ -2,9 +2,18 @@ seed: 42
 
 data:
   # VMAF 训练请用带 pass1_vmaf/pass2_vmaf 的合并表
-  labels_csv: "/data/lh/qp_state_predictor/dataset/vca_rc_merged_with_pass1_vmaf.csv"
+  labels_csv: "/data/lh/qp_state_predictor/dataset/training.csv"
   yuv_root: "/mnt/ec-data2/lh_data/vtcoder_yuv/720p/"
-  cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_cache/"
+  cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_new_cache/"
+  # DataLoader 每个 worker 内最多同时 mmap 的序列数；shuffle 跨很多序列时过小会反复打开文件略慢，过大易 OOM
+  cache_max_open_sequences: 10
+  pair_cache_max_open_sequences: 10
+  y_lowres_cache_suffix: ".ylow.npy"
+  y_lowres_cache_max_open_sequences: 2
+  # Phase1 预打包 tensor cache：worker 内 LRU 上限（与 Phase2 类似）
+  phase1_tensor_cache_max_open_sequences: 4
+  # Phase2 预打包 tensor cache 在 worker 内以整序列 ndarray 常驻；按 sequence 聚 batch 时 2～4 通常足够
+  phase2_tensor_cache_max_open_sequences: 4
   output_root: "/data/lh/qp_state_predictor/outputs/"
 
   sequence_col: "sequence"
@@ -69,17 +78,27 @@ features:
   use_pair_cache: true
   pair_cache_suffix: ".pair.npz"
   pair_cache_required: false
-  pair_cache_fallback_online: true
+  pair_cache_fallback_online: false
+  # 生成 <seq>.phase1_<profile>_<tag>.npz 后，Phase1 可整块读取（需先 preprocess_cache）
+  use_phase1_tensor_cache: true
+  phase1_tensor_cache_required: true
+  # 生成 <seq>.phase2_<profile>_<mse_term>.npz 后，Phase2 可直接整块读取训练张量
+  use_phase2_tensor_cache: true
+  phase2_tensor_cache_required: true
 
 train:
-  num_workers: 64
-  # 每 epoch 是否在训练集上跑完整 eval；false 可省大量内存/时间（val/test 仍 eval）。OOM 时可设 false
-  eval_full_train_each_epoch: true
-  # DataLoader 预取（仅 num_workers>0 生效）；远端盘慢时可试 6～8
-  prefetch_factor: 8
-  epochs: 50
+  # 过大会拖垮系统内存（子进程 × prefetch × batch）；OOM 时降到 2～4，或设 num_workers: 0
+  num_workers: 8
+  # 训练集整轮 eval 开销很大；只看 val/test 可先设 false，训练吞吐会明显更高
+  eval_full_train_each_epoch: false
+  # DataLoader 预取（仅 num_workers>0 生效）；与 num_workers 相乘会占用大量 RAM
+  prefetch_factor: 2
+  # 训练集按 sequence 聚 batch，显著减少跨序列随机读导致的 cache thrash
+  sequence_grouped_batches: true
+  epochs: 100
   # 单卡：即为该卡 batch。双卡 DDP（torchrun）：为每卡 batch，全局 batch ≈ 该值 × GPU 数
   batch_size_phase1: 512
+  # 在 LRU cache 限制下恢复到更大的 Phase2 batch，减少每 epoch step 数
   batch_size_phase2: 512
   # Phase3：当前实现要求 batch 内 topo_order 一致；不同 segment 拓扑不同须设为 1，否则会报错
   batch_size_phase3: 1
@@ -97,8 +116,8 @@ loss:
   bits_weight: 1.0
   mse_weight: 1.0
   aux_weight: 0.3
-  # 失真第二项：log_mse | psnr | vmaf（直接回归 VMAF；需 data.vmaf_col 与 CSV 列）
-  mse_term: "psnr"
+  # 失真第二项：log_mse | psnr | vmaf（bits+mse 联合：single + log_mse）
+  mse_term: "log_mse"
   huber_delta_psnr: null
   huber_delta_psnr_scale: 5.0
   # huber_delta_vmaf: null
@@ -110,11 +129,11 @@ loss:
 #   python -m qp_predictor.train --config my_config.yaml --phase 1 --model-mode double --double-target distortion --mse-term log_mse
 # 环境变量（CLI 未写时）：QP_TRAIN_MODEL_MODE, QP_TRAIN_DOUBLE_TARGET, QP_TRAIN_MSE_TERM
 model:
-  # single：一头输出 2 维 (bits, log_mse)；double：两头各训一个同结构单输出网络，目录见 data 说明
-  mode: "double"
-  # mode=double 时：bits → 仅训码率；distortion → 仅训失真（psnr→_double_psnr，log_mse→_double_mse，vmaf→_double_vmaf）
+  # single：一头输出 2 维 (bits + 失真)；double：两头各训一个同结构单输出网络，目录见 data 说明
+  mode: "single"
+  # 仅 mode=double 时生效：bits | distortion
   double_target: "bits"
-  phase2_variant: "phase2_1"
+  phase2_variant: "flat"
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64

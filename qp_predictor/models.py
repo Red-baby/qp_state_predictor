@@ -145,7 +145,8 @@ class Phase2_1Net(nn.Module):
 
         edge_embed = self.edge_encoder(torch.cat(edge_parts, dim=-1)) * ref_valid
         gate_logits = self.edge_gate(edge_embed)
-        gate_logits = gate_logits.masked_fill(ref_valid <= 0, -1e9)
+        # AMP 下 logits 可能为 float16，-1e9 无法表示；用 dtype 可表示的最小值做 softmax mask
+        gate_logits = gate_logits.masked_fill(ref_valid <= 0, torch.finfo(gate_logits.dtype).min)
         edge_weights = torch.softmax(gate_logits, dim=1) * ref_valid
         edge_weights = edge_weights / edge_weights.sum(dim=1, keepdim=True).clamp_min(1.0)
         context = (edge_weights * edge_embed).sum(dim=1)

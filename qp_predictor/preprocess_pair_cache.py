@@ -69,17 +69,16 @@ def _process_sequence_pair_cache(job: dict) -> str:
     base_path = Path(job["base_path"])
     if not base_path.is_file():
         return f"[skip] no base cache: {base_path}"
+    ylow_path = Path(job["ylow_path"])
+    if not ylow_path.is_file():
+        return f"[skip] no y_lowres cache: {ylow_path}"
 
     ordered = [tuple(edge) for edge in job["edges"]]
     if not ordered:
         return f"[skip] no edges: {sequence}"
 
-    data = np.load(base_path, allow_pickle=False, mmap_mode="r")
+    y_lowres = np.load(ylow_path, allow_pickle=False, mmap_mode="r")
     try:
-        if "y_lowres" not in data:
-            raise KeyError(f"{base_path} missing y_lowres")
-        y_lowres = data["y_lowres"]
-
         pair_dims = {profile: len(pair_feature_names(profile)) for profile in PROFILES}
         cur_list: list[int] = []
         ref_list: list[int] = []
@@ -104,7 +103,7 @@ def _process_sequence_pair_cache(job: dict) -> str:
                     raise ValueError(f"pair_dim mismatch {pv.shape[0]} != {pair_dims[profile]}")
                 feats_lists[profile].append(pv.astype(np.float32))
     finally:
-        data.close()
+        del y_lowres
 
     save_payload = {
         "cur_pocs": np.asarray(cur_list, dtype=np.int32),
@@ -120,7 +119,7 @@ def _process_sequence_pair_cache(job: dict) -> str:
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".npz", dir=str(out_path.parent))
     os.close(tmp_fd)
     try:
-        np.savez_compressed(tmp_path, **save_payload)
+        np.savez(tmp_path, **save_payload)
         os.replace(tmp_path, str(out_path))
     except Exception:
         if os.path.exists(tmp_path):
@@ -151,6 +150,7 @@ def main():
     ensure_dir(cache_dir)
 
     suffix = str(feat_cfg.get("pair_cache_suffix", ".pair.npz"))
+    ylow_suffix = str(data_cfg.get("y_lowres_cache_suffix", ".ylow.npy"))
     block_size = int(feat_cfg["pair_block_size"])
     changed_th = float(feat_cfg["changed_threshold"])
     rw = int(data_cfg["resize_width"])
@@ -165,6 +165,7 @@ def main():
                 "sequence": sequence,
                 "out_path": str(cache_dir / f"{sequence}{suffix}"),
                 "base_path": str(cache_dir / f"{sequence}.npz"),
+                "ylow_path": str(cache_dir / f"{sequence}{ylow_suffix}"),
                 "edges": sorted(_collect_edges_for_sequence(manifest, sequence)),
                 "resize_width": rw,
                 "resize_height": rh,

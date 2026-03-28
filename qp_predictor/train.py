@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -235,6 +235,48 @@ def _dataloader_common_kwargs(train_cfg: dict) -> dict:
     return kwargs
 
 
+class SequenceBatchSampler(Sampler[list[int]]):
+    """按 sequence 聚 batch，减少跨序列随机访问带来的 mmap/file thrash。"""
+
+    def __init__(self, sequences: np.ndarray, batch_size: int, *, seed: int = 42, drop_last: bool = False):
+        self.batch_size = max(1, int(batch_size))
+        self.seed = int(seed)
+        self.drop_last = bool(drop_last)
+        self.epoch = 0
+        self._groups: dict[str, np.ndarray] = {}
+        for idx, seq in enumerate(np.asarray(sequences, dtype=object)):
+            self._groups.setdefault(str(seq), []).append(idx)
+        self._seq_keys = list(self._groups.keys())
+        self._groups = {k: np.asarray(v, dtype=np.int64) for k, v in self._groups.items()}
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        seq_keys = list(self._seq_keys)
+        rng.shuffle(seq_keys)
+        for seq in seq_keys:
+            idxs = self._groups[seq].copy()
+            rng.shuffle(idxs)
+            n = len(idxs)
+            for start in range(0, n, self.batch_size):
+                batch = idxs[start : start + self.batch_size]
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+                yield batch.tolist()
+
+    def __len__(self) -> int:
+        total = 0
+        for idxs in self._groups.values():
+            n = len(idxs)
+            if self.drop_last:
+                total += n // self.batch_size
+            else:
+                total += (n + self.batch_size - 1) // self.batch_size
+        return total
+
+
 def make_dataloaders(
     manifest,
     cfg,
@@ -258,13 +300,25 @@ def make_dataloaders(
             if distributed_train
             else None
         )
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=batch_size,
-            shuffle=train_sampler is None,
-            sampler=train_sampler,
-            **dl_kw,
-        )
+        use_seq_batch_sampler = bool(train_cfg.get("sequence_grouped_batches", True)) and not distributed_train
+        if use_seq_batch_sampler and hasattr(train_ds, "_yuv_sequence_arr"):
+            train_loader = DataLoader(
+                train_ds,
+                batch_sampler=SequenceBatchSampler(
+                    train_ds._yuv_sequence_arr,
+                    batch_size=batch_size,
+                    seed=int(cfg.get("seed", 42)),
+                ),
+                **dl_kw,
+            )
+        else:
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=batch_size,
+                shuffle=train_sampler is None,
+                sampler=train_sampler,
+                **dl_kw,
+            )
         eval_loader = DataLoader(
             eval_ds,
             batch_size=batch_size,
@@ -1216,7 +1270,7 @@ def train_one_epoch(
     def train_step_batch(batch) -> float:
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(enabled=amp_enabled):
+        with autocast(device_type="cuda", enabled=amp_enabled):
             outputs = model(batch)
             loss, _ = compute_loss(batch, outputs, cfg, phase)
 
@@ -1420,7 +1474,10 @@ def main():
         lr=float(cfg["train"]["lr"]),
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
-    scaler = GradScaler(enabled=bool(cfg["train"]["amp"]) and device.type == "cuda")
+    scaler = GradScaler(
+        "cuda",
+        enabled=bool(cfg["train"]["amp"]) and device.type == "cuda",
+    )
 
     if int(args.bench_data) > 0:
         if rank == 0:
@@ -1450,6 +1507,10 @@ def main():
             sampler = train_loader.sampler
             if isinstance(sampler, DistributedSampler):
                 sampler.set_epoch(epoch)
+        else:
+            batch_sampler = getattr(train_loader, "batch_sampler", None)
+            if hasattr(batch_sampler, "set_epoch"):
+                batch_sampler.set_epoch(epoch)
 
         if rank == 0:
             print(f"\n===== Phase {args.phase} | Epoch {epoch}/{cfg['train']['epochs']} =====")

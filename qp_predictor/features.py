@@ -4,6 +4,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from .config import is_double_bits_cfg
+
 FEATURE_PROFILE_LEGACY = "legacy"
 FEATURE_PROFILE_BITS = "bits"
 FEATURE_PROFILE_VMAF = "vmaf"
@@ -397,6 +399,12 @@ def extract_self_features(
 
 
 def pass1_feature_names(cfg: Optional[dict] = None) -> List[str]:
+    if cfg is not None and is_double_bits_cfg(cfg):
+        return [
+            "pass1_qp_norm",
+            "pass1_log_bits",
+            "delta_qp_from_pass1",
+        ]
     if cfg is not None:
         term = str(cfg.get("loss", {}).get("mse_term", "log_mse")).lower().strip()
         if term == "vmaf":

@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
         "bit_depth": 8,
         "resize_width": 192,
         "resize_height": 108,
+        "y_lowres_cache_suffix": ".ylow.npy",
+        "y_lowres_cache_max_open_sequences": 2,
         "i_interval": 125,
         "gop_size": 16,
         "tail_hier_min": 4,
@@ -68,6 +70,8 @@ DEFAULT_CONFIG = {
         },
         # pass1 VMAF 输入归一化：pass1_vmaf / pass1_vmaf_norm_div（与 qp 归一化同量级）
         "pass1_vmaf_norm_div": 100.0,
+        "phase1_tensor_cache_max_open_sequences": 4,
+        "phase2_tensor_cache_max_open_sequences": 4,
     },
     "features": {
         "block_size": 8,
@@ -80,6 +84,12 @@ DEFAULT_CONFIG = {
         "pair_cache_suffix": ".pair.npz",
         "pair_cache_required": False,
         "pair_cache_fallback_online": True,
+        "use_phase1_tensor_cache": False,
+        "phase1_tensor_cache_required": False,
+        "phase1_tensor_cache_suffix": ".phase1_{feature_profile}_{mse_term}.npz",
+        "use_phase2_tensor_cache": False,
+        "phase2_tensor_cache_required": False,
+        "phase2_tensor_cache_suffix": ".phase2_{feature_profile}_{mse_term}.npz",
     },
     "train": {
         "num_workers": 4,
@@ -96,6 +106,7 @@ DEFAULT_CONFIG = {
         "save_every": 1,
         # 每 epoch 是否在训练集上跑完整 eval（与 val 一样扫全数据）；false 可明显省内存/时间，history 中 train 仅保留 opt_loss 占位
         "eval_full_train_each_epoch": True,
+        "sequence_grouped_batches": False,
         # 多卡 DDP（torchrun）：batch_size_phase* 为每卡 batch；见 README 或 run_train_ddp.sh
         "ddp_find_unused_parameters": False,
     },
@@ -135,6 +146,13 @@ def load_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         user_cfg = yaml.safe_load(f)
     return _deep_update(DEFAULT_CONFIG, user_cfg or {})
+
+
+def is_double_bits_cfg(cfg: dict) -> bool:
+    """mode=double 且 double_target=bits：仅训码率，pass1/target 不含失真先验。"""
+    m = str(cfg.get("model", {}).get("mode", "single")).lower().strip()
+    d = str(cfg.get("model", {}).get("double_target", "bits")).lower().strip()
+    return m == "double" and d == "bits"
 
 
 def normalize_mse_term(term: str) -> str:

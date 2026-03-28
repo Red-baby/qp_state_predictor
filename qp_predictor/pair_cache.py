@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
@@ -26,7 +27,8 @@ class PairCacheManager:
             "pair_block_size": int(feat["pair_block_size"]),
             "changed_threshold": float(feat["changed_threshold"]),
         }
-        self._stores: Dict[str, Any] = {}
+        self._max_open = max(1, int(data.get("pair_cache_max_open_sequences", 8)))
+        self._stores: OrderedDict[str, Any] = OrderedDict()
 
     def _read_scalar(self, data: np.lib.npyio.NpzFile, key: str) -> Union[float, int]:
         arr = data[key]
@@ -51,22 +53,31 @@ class PairCacheManager:
         if int(pf.shape[1]) != self.pair_dim:
             raise ValueError(f"pair_feats dim {pf.shape[1]} != expected {self.pair_dim}")
 
-    def _open(self, sequence: str) -> Optional[dict]:
-        if sequence in self._stores:
-            return self._stores[sequence]
+    def _evict_if_needed(self) -> None:
+        while len(self._stores) >= self._max_open:
+            self._stores.popitem(last=False)
 
-        path = self.cache_dir / f"{sequence}{self.suffix}"
+    def _open(self, sequence: str) -> Optional[dict]:
+        seq = str(sequence)
+        if seq in self._stores:
+            self._stores.move_to_end(seq)
+            return self._stores[seq]
+
+        path = self.cache_dir / f"{seq}{self.suffix}"
         if not path.is_file():
             if self.required:
                 raise FileNotFoundError(f"pair cache required but missing: {path}")
-            self._stores[sequence] = None
+            self._evict_if_needed()
+            self._stores[seq] = None
             return None
 
         data = np.load(path, allow_pickle=False, mmap_mode="r")
         if self.pair_key not in data:
             if self.required:
                 raise KeyError(f"pair cache missing feature key {self.pair_key!r}: {path}")
-            self._stores[sequence] = None
+            data.close()
+            self._evict_if_needed()
+            self._stores[seq] = None
             return None
         self._validate_meta(data)
         cur = np.asarray(data["cur_pocs"], dtype=np.int64)
@@ -74,7 +85,8 @@ class PairCacheManager:
         pair_feats = data[self.pair_key]
         edge_map = {(int(cur[i]), int(ref[i])): int(i) for i in range(int(cur.shape[0]))}
         store = {"pair_feats": pair_feats, "edge_map": edge_map}
-        self._stores[sequence] = store
+        self._evict_if_needed()
+        self._stores[seq] = store
         return store
 
     def get_pair_feats(self, sequence: str, cur_poc: int, ref_poc: int) -> Optional[np.ndarray]:

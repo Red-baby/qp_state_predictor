@@ -30,7 +30,30 @@ PROFILES = (
 
 
 def _required_keys() -> set[str]:
-    return {"y_lowres"} | {self_feature_storage_key(profile) for profile in PROFILES}
+    return {self_feature_storage_key(profile) for profile in PROFILES}
+
+
+def _y_lowres_cache_path(cache_dir: Path, sequence: str, suffix: str) -> Path:
+    return cache_dir / f"{sequence}{suffix}"
+
+
+def _save_split_cache(base_path: Path, ylow_path: Path, y_lowres: np.ndarray, self_buffers: dict[str, np.ndarray]) -> None:
+    tmp_fd, tmp_base = tempfile.mkstemp(suffix=".npz", dir=str(base_path.parent))
+    os.close(tmp_fd)
+    tmp_fd, tmp_ylow = tempfile.mkstemp(suffix=".npy", dir=str(ylow_path.parent))
+    os.close(tmp_fd)
+    try:
+        np.savez(tmp_base, **self_buffers)
+        with open(tmp_ylow, "wb") as f:
+            np.save(f, y_lowres, allow_pickle=False)
+        os.replace(tmp_base, str(base_path))
+        os.replace(tmp_ylow, str(ylow_path))
+    except Exception:
+        if os.path.exists(tmp_base):
+            os.unlink(tmp_base)
+        if os.path.exists(tmp_ylow):
+            os.unlink(tmp_ylow)
+        raise
 
 
 def _resolve_workers(requested: int, num_jobs: int) -> int:
@@ -44,17 +67,26 @@ def _resolve_workers(requested: int, num_jobs: int) -> int:
 def _process_sequence_cache(job: dict) -> str:
     sequence = str(job["sequence"])
     out_path = Path(job["out_path"])
+    ylow_path = Path(job["ylow_path"])
     required_keys = set(job["required_keys"])
 
     if out_path.exists():
         data = np.load(out_path, allow_pickle=False, mmap_mode="r")
         try:
             existing_keys = set(data.files)
+            missing_required = required_keys - existing_keys
+            has_embedded_ylow = "y_lowres" in existing_keys
+            if not missing_required:
+                if has_embedded_ylow:
+                    y_lowres = np.asarray(data["y_lowres"], dtype=np.uint8)
+                    self_buffers = {k: np.asarray(data[k], dtype=np.float32) for k in sorted(required_keys)}
+                    _save_split_cache(out_path, ylow_path, y_lowres, self_buffers)
+                    return f"[migrated] split y_lowres -> {ylow_path}"
+                if ylow_path.exists():
+                    return f"[skip] cache exists: {out_path}"
         finally:
             data.close()
-        if required_keys.issubset(existing_keys):
-            return f"[skip] cache exists: {out_path}"
-        print(f"[rebuild] cache missing new feature keys: {out_path}")
+        print(f"[rebuild] cache missing split cache or new feature keys: {out_path}")
 
     frame_ids = [int(p) for p in job["frame_ids"]]
     max_poc = max(frame_ids)
@@ -91,16 +123,8 @@ def _process_sequence_cache(job: dict) -> str:
                 self_buffers[key] = np.zeros((max_poc + 1, feats.shape[0]), dtype=np.float32)
             self_buffers[key][poc] = feats.astype(np.float32)
 
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".npz", dir=str(out_path.parent))
-    os.close(tmp_fd)
-    try:
-        np.savez_compressed(tmp_path, y_lowres=y_lowres, **self_buffers)
-        os.replace(tmp_path, str(out_path))
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
-    return f"[saved] {out_path}"
+    _save_split_cache(out_path, ylow_path, y_lowres, self_buffers)
+    return f"[saved] {out_path} + {ylow_path}"
 
 
 def main():
@@ -130,6 +154,7 @@ def main():
     out_h = int(data_cfg["resize_height"])
     filename_tmpl = data_cfg["yuv_filename_template"]
     yuv_root = Path(data_cfg["yuv_root"])
+    ylow_suffix = str(data_cfg.get("y_lowres_cache_suffix", ".ylow.npy"))
     required_keys = sorted(_required_keys())
 
     jobs = []
@@ -140,6 +165,7 @@ def main():
                 "frame_ids": sorted(set(int(p) for p in g["poc"].tolist())),
                 "yuv_path": str(yuv_root / filename_tmpl.format(sequence=sequence)),
                 "out_path": str(cache_dir / f"{sequence}.npz"),
+                "ylow_path": str(_y_lowres_cache_path(cache_dir, str(sequence), ylow_suffix)),
                 "width": width,
                 "height": height,
                 "bit_depth": bit_depth,
