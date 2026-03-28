@@ -377,7 +377,7 @@ class FrameDataset(Dataset):
             return None
         if poc >= int(payload["present_mask"].shape[0]) or not bool(payload["present_mask"][poc]):
             return None
-        return {
+        out = {
             "self_feats": torch.from_numpy(payload["self_feats"][poc]),
             "meta_feats": torch.from_numpy(payload["meta_feats"][poc]),
             "qp": torch.from_numpy(payload["qp"][poc]),
@@ -392,6 +392,13 @@ class FrameDataset(Dataset):
             "ref_valid_mask": torch.from_numpy(payload["ref_valid_mask"][poc]),
             "ref_pass1_feats": torch.from_numpy(payload["ref_pass1_feats"][poc]),
         }
+        if is_double_bits_cfg(self.cfg):
+            if self._mse_term == "vmaf":
+                aux_dist_target = np.asarray([float(self._vmaf_arr[idx])], dtype=np.float32)
+            else:
+                aux_dist_target = np.asarray([np.log(float(self._mse_arr[idx]) + 1e-6)], dtype=np.float32)
+            out["aux_dist_target"] = torch.from_numpy(aux_dist_target)
+        return out
 
     def __getitem__(self, idx: int):
         seq = str(self._yuv_sequence_arr[idx])
@@ -439,6 +446,12 @@ class FrameDataset(Dataset):
             "valid_mask": torch.tensor(float(self._valid_train_arr[idx]), dtype=torch.float32),
             "sequence": str(self._sequence_arr[idx]),
         }
+        if self.phase == 2 and is_double_bits_cfg(self.cfg):
+            if self._mse_term == "vmaf":
+                aux_dist_target = np.asarray([float(self._vmaf_arr[idx])], dtype=np.float32)
+            else:
+                aux_dist_target = np.asarray([np.log(float(self._mse_arr[idx]) + 1e-6)], dtype=np.float32)
+            out["aux_dist_target"] = torch.from_numpy(aux_dist_target)
 
         out["pass1_feats"] = torch.from_numpy(
             _build_pass1_vector_fast(

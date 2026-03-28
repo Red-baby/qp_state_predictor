@@ -35,7 +35,7 @@ from .features import (
     self_feature_names,
 )
 from .manifest import build_manifest
-from .models import Phase1Net, Phase2Net, Phase2_1Net, Phase3Net
+from .models import Phase1Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
 from .utils import (
     compute_psnr_from_mse_torch,
     ensure_dir,
@@ -104,6 +104,10 @@ def phase2_variant(cfg: dict) -> str:
     return str(cfg.get("model", {}).get("phase2_variant", "flat")).lower().strip()
 
 
+def is_phase2_2_variant(cfg: dict) -> bool:
+    return phase2_variant(cfg) == "phase2_2"
+
+
 def model_mode_tag(cfg: dict) -> str:
     """与 evaluate_loader 返回的 model_mode 一致。"""
     if not is_double_mode(cfg):
@@ -155,8 +159,8 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     base = f"phase{phase}"
     if phase == 2:
         v = phase2_variant(cfg)
-        if v not in ("flat", "phase2_1"):
-            raise ValueError(f'model.phase2_variant 必须为 "flat" 或 "phase2_1"，当前为 {v!r}')
+        if v not in ("flat", "phase2_1", "phase2_2"):
+            raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1" 或 "phase2_2"，当前为 {v!r}')
         if v != "flat":
             base = v
     data_cfg = cfg["data"]
@@ -215,7 +219,16 @@ def build_model(cfg: dict, phase: int):
                 cfg=cfg,
                 out_dim=head_out,
             )
-        raise ValueError(f'model.phase2_variant 必须为 "flat" 或 "phase2_1"，当前为 {v!r}')
+        if v == "phase2_2":
+            return Phase2_2Net(
+                self_dim=self_dim,
+                pair_dim=pair_dim,
+                meta_dim=meta_dim,
+                pass1_dim=pass1_dim,
+                cfg=cfg,
+                out_dim=head_out,
+            )
+        raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1" 或 "phase2_2"，当前为 {v!r}')
     if phase == 3:
         return Phase3Net(self_dim=self_dim, pair_dim=pair_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, head_out_dim=head_out)
     raise ValueError(f"Unsupported phase: {phase}")
@@ -401,6 +414,40 @@ def _huber_distortion_term(
     )
 
 
+def _phase2_bits_hybrid_loss(
+    pred_log_bits: torch.Tensor,
+    target_log_bits: torch.Tensor,
+    mask: torch.Tensor,
+    cfg: dict,
+) -> tuple[torch.Tensor, dict]:
+    delta = float(cfg["train"]["huber_delta"])
+    loss_log = huber_loss_masked(pred_log_bits, target_log_bits, mask, delta)
+
+    linear_w = float(cfg.get("loss", {}).get("bits_linear_weight", 0.25))
+    linear_div = max(float(cfg.get("loss", {}).get("bits_linear_divisor", 16384.0)), 1.0)
+    linear_delta_cfg = cfg.get("loss", {}).get("bits_linear_huber_delta", None)
+    linear_delta = float(linear_delta_cfg) if linear_delta_cfg is not None else delta
+    loss_lin = pred_log_bits.new_zeros(())
+    if linear_w > 0.0:
+        pred_bits = inverse_log_bits(pred_log_bits) / linear_div
+        true_bits = inverse_log_bits(target_log_bits) / linear_div
+        loss_lin = huber_loss_masked(pred_bits, true_bits, mask, linear_delta)
+    total = loss_log + (linear_w * loss_lin if linear_w > 0.0 else 0.0)
+    return total, {
+        "loss_bits_log": float(loss_log.item()),
+        "loss_bits_linear": float(loss_lin.item()) if linear_w > 0.0 else 0.0,
+    }
+
+
+def _phase2_aux_dist_target(batch: dict, cfg: dict) -> torch.Tensor | None:
+    if "aux_dist_target" in batch:
+        return batch["aux_dist_target"]
+    target = batch.get("target")
+    if target is None or target.shape[-1] < 2:
+        return None
+    return target[..., 1:2]
+
+
 def compute_loss(batch, outputs, cfg, phase: int):
     delta = float(cfg["train"]["huber_delta"])
     bits_w = float(cfg["loss"]["bits_weight"])
@@ -412,9 +459,17 @@ def compute_loss(batch, outputs, cfg, phase: int):
         pred = outputs["pred"]
         target = batch["target"]
         mask = batch["valid_mask"]
+        phase2_2 = phase == 2 and is_phase2_2_variant(cfg)
         if is_double_mode(cfg):
             if double_target(cfg) == "bits":
-                loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
+                if phase2_2:
+                    loss_bits, bits_extra_logs = _phase2_bits_hybrid_loss(pred[..., 0:1], target[..., 0:1], mask, cfg)
+                else:
+                    loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
+                    bits_extra_logs = {
+                        "loss_bits_log": float(loss_bits.item()),
+                        "loss_bits_linear": 0.0,
+                    }
                 loss = bits_w * loss_bits
                 logs = {
                     "loss": float(loss.item()),
@@ -423,6 +478,17 @@ def compute_loss(batch, outputs, cfg, phase: int):
                     "mse_term": mse_term,
                     "model_mode": "double_bits",
                 }
+                logs.update(bits_extra_logs)
+                if phase2_2 and outputs.get("aux_dist") is not None:
+                    aux_target = _phase2_aux_dist_target(batch, cfg)
+                    if aux_target is not None:
+                        aux_dist = _huber_distortion_term(outputs["aux_dist"], aux_target, mask, delta, cfg)
+                        loss = loss + aux_w * aux_dist
+                        logs["loss"] = float(loss.item())
+                        if mse_term == "vmaf":
+                            logs["loss_aux_vmaf"] = float(aux_dist.item())
+                        else:
+                            logs["loss_aux_mse"] = float(aux_dist.item())
                 return loss, logs
             loss_mse = _huber_distortion_term(pred[..., 0:1], target[..., 1:2], mask, delta, cfg)
             loss = mse_w * loss_mse
@@ -432,6 +498,11 @@ def compute_loss(batch, outputs, cfg, phase: int):
                 "mse_term": mse_term,
                 "model_mode": "double_distortion",
             }
+            if phase2_2 and outputs.get("aux_bits") is not None:
+                aux_bits = huber_loss_masked(outputs["aux_bits"], target[..., 0:1], mask, delta)
+                loss = loss + aux_w * aux_bits
+                logs["loss"] = float(loss.item())
+                logs["loss_aux_bits"] = float(aux_bits.item())
             if mse_term == "vmaf":
                 logs["loss_vmaf"] = float(loss_mse.item())
                 logs["loss_mse"] = 0.0
@@ -442,7 +513,14 @@ def compute_loss(batch, outputs, cfg, phase: int):
                     logs["distortion_huber_delta"] = _effective_huber_delta_psnr(cfg)
             return loss, logs
 
-        loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
+        if phase2_2:
+            loss_bits, bits_extra_logs = _phase2_bits_hybrid_loss(pred[..., 0:1], target[..., 0:1], mask, cfg)
+        else:
+            loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
+            bits_extra_logs = {
+                "loss_bits_log": float(loss_bits.item()),
+                "loss_bits_linear": 0.0,
+            }
         loss_mse = _huber_distortion_term(pred[..., 1:2], target[..., 1:2], mask, delta, cfg)
         loss = bits_w * loss_bits + mse_w * loss_mse
         logs = {
@@ -450,6 +528,21 @@ def compute_loss(batch, outputs, cfg, phase: int):
             "loss_bits": float(loss_bits.item()),
             "mse_term": mse_term,
         }
+        logs.update(bits_extra_logs)
+        if phase2_2:
+            if outputs.get("aux_dist_from_bits") is not None:
+                aux_dist = _huber_distortion_term(outputs["aux_dist_from_bits"], target[..., 1:2], mask, delta, cfg)
+                loss = loss + aux_w * aux_dist
+                logs["loss"] = float(loss.item())
+                if mse_term == "vmaf":
+                    logs["loss_aux_vmaf"] = float(aux_dist.item())
+                else:
+                    logs["loss_aux_mse"] = float(aux_dist.item())
+            if outputs.get("aux_bits_from_dist") is not None:
+                aux_bits = huber_loss_masked(outputs["aux_bits_from_dist"], target[..., 0:1], mask, delta)
+                loss = loss + aux_w * aux_bits
+                logs["loss"] = float(loss.item())
+                logs["loss_aux_bits"] = float(aux_bits.item())
         if mse_term == "vmaf":
             logs["loss_vmaf"] = float(loss_mse.item())
             logs["loss_mse"] = 0.0
