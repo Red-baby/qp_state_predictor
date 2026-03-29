@@ -40,6 +40,55 @@ class Phase1Net(nn.Module):
         return {"pred": pred}
 
 
+def _zero_last_linear(module: nn.Module) -> None:
+    if not hasattr(module, "net"):
+        return
+    for layer in reversed(list(module.net)):
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+            return
+
+
+class Phase1_1Net(nn.Module):
+    """Phase1_1: 共享 backbone + shared base head + TL residual heads。"""
+
+    def __init__(self, self_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
+        super().__init__()
+        hid = int(cfg["model"]["head_hidden"])
+        dropout = float(cfg["model"]["dropout"])
+        self.pass1_dim = pass1_dim
+        self.out_dim = int(out_dim)
+        in_dim = self_dim + meta_dim + 1 + pass1_dim
+
+        self.backbone = MLP(in_dim, hid, hid, dropout=dropout, num_layers=3)
+        self.base_head = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+        self.tl0_head = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+        self.tl1_head = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+        self.other_head = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+
+        # 从原 Phase1 起步，逐步学习 TL 专用修正，避免小样本 TL0 一开始把基线拉坏。
+        _zero_last_linear(self.tl0_head)
+        _zero_last_linear(self.tl1_head)
+        _zero_last_linear(self.other_head)
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        parts = [batch["self_feats"], batch["meta_feats"], batch["qp"]]
+        if self.pass1_dim > 0 and "pass1_feats" in batch:
+            parts.append(batch["pass1_feats"])
+        x = torch.cat(parts, dim=-1)
+        h = self.backbone(x)
+
+        base = self.base_head(h)
+        tl = batch["temporal_layer"].to(dtype=torch.long)
+
+        residual = self.other_head(h)
+        residual = torch.where((tl == 0).unsqueeze(-1), self.tl0_head(h), residual)
+        residual = torch.where((tl == 1).unsqueeze(-1), self.tl1_head(h), residual)
+        pred = base + residual
+        return {"pred": pred}
+
+
 class Phase2Net(nn.Module):
     def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
         super().__init__()

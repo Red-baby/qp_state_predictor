@@ -131,6 +131,7 @@ DEFAULT_CONFIG = {
         "mode": "single",
         # mode=double 时必填：bits（_double_bits）| distortion（_double_psnr | _double_mse | _double_vmaf，由 loss.mse_term）
         "double_target": "bits",
+        "phase1_variant": "flat",
         "phase2_variant": "flat",
         "self_hidden": 128,
         "edge_hidden": 128,

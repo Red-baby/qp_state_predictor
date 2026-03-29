@@ -35,7 +35,7 @@ from .features import (
     self_feature_names,
 )
 from .manifest import build_manifest
-from .models import Phase1Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
+from .models import Phase1Net, Phase1_1Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
 from .utils import (
     compute_psnr_from_mse_torch,
     ensure_dir,
@@ -139,6 +139,10 @@ def model_head_out_dim(cfg: dict) -> int:
     return 1 if is_double_mode(cfg) else 2
 
 
+def phase1_variant(cfg: dict) -> str:
+    return str(cfg.get("model", {}).get("phase1_variant", "flat")).lower().strip()
+
+
 def _double_mode_dir_suffix(cfg: dict) -> str:
     """double 专用目录后缀：_double_bits | _double_psnr | _double_mse | _double_vmaf"""
     dt = double_target(cfg)
@@ -157,6 +161,12 @@ def _double_mode_dir_suffix(cfg: dict) -> str:
 def phase_output_dirname(cfg: dict, phase: int) -> str:
     """输出目录名：phase{N} + _pass1 + 单头失真后缀 或 double 后缀。"""
     base = f"phase{phase}"
+    if phase == 1:
+        v = phase1_variant(cfg)
+        if v not in ("flat", "phase1_1"):
+            raise ValueError(f'model.phase1_variant 必须为 "flat" 或 "phase1_1"，当前为 {v!r}')
+        if v != "flat":
+            base = v
     if phase == 2:
         v = phase2_variant(cfg)
         if v not in ("flat", "phase2_1", "phase2_2"):
@@ -198,7 +208,12 @@ def build_model(cfg: dict, phase: int):
     head_out = model_head_out_dim(cfg)
 
     if phase == 1:
-        return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        v = phase1_variant(cfg)
+        if v == "flat":
+            return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        if v == "phase1_1":
+            return Phase1_1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        raise ValueError(f'model.phase1_variant 必须为 "flat" 或 "phase1_1"，当前为 {v!r}')
     if phase == 2:
         v = phase2_variant(cfg)
         if v == "flat":
