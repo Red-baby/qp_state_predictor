@@ -35,7 +35,7 @@ from .features import (
     self_feature_names,
 )
 from .manifest import build_manifest
-from .models import Phase1Net, Phase1_1Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
+from .models import Phase1Net, Phase1_1Net, Phase1_2Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
 from .utils import (
     compute_psnr_from_mse_torch,
     ensure_dir,
@@ -163,8 +163,8 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     base = f"phase{phase}"
     if phase == 1:
         v = phase1_variant(cfg)
-        if v not in ("flat", "phase1_1"):
-            raise ValueError(f'model.phase1_variant 必须为 "flat" 或 "phase1_1"，当前为 {v!r}')
+        if v not in ("flat", "phase1_1", "phase1_2"):
+            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1" 或 "phase1_2"，当前为 {v!r}')
         if v != "flat":
             base = v
     if phase == 2:
@@ -213,7 +213,9 @@ def build_model(cfg: dict, phase: int):
             return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_1":
             return Phase1_1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
-        raise ValueError(f'model.phase1_variant 必须为 "flat" 或 "phase1_1"，当前为 {v!r}')
+        if v == "phase1_2":
+            return Phase1_2Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1" 或 "phase1_2"，当前为 {v!r}')
     if phase == 2:
         v = phase2_variant(cfg)
         if v == "flat":

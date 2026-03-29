@@ -89,6 +89,44 @@ class Phase1_1Net(nn.Module):
         return {"pred": pred}
 
 
+class Phase1_2Net(nn.Module):
+    """Phase1_2: 共享 backbone + shared base head + 仅 TL0 的轻量 gated residual。"""
+
+    def __init__(self, self_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
+        super().__init__()
+        hid = int(cfg["model"]["head_hidden"])
+        dropout = float(cfg["model"]["dropout"])
+        self.pass1_dim = pass1_dim
+        self.out_dim = int(out_dim)
+        in_dim = self_dim + meta_dim + 1 + pass1_dim
+
+        self.backbone = MLP(in_dim, hid, hid, dropout=dropout, num_layers=3)
+        self.base_head = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+        self.tl0_residual = MLP(hid, hid, self.out_dim, dropout=dropout, num_layers=2)
+        self.tl0_gate = MLP(hid, hid, 1, dropout=dropout, num_layers=2)
+
+        # 默认退化成旧 Phase1，只让 TL0 residual 逐步学出来。
+        _zero_last_linear(self.tl0_residual)
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        parts = [batch["self_feats"], batch["meta_feats"], batch["qp"]]
+        if self.pass1_dim > 0 and "pass1_feats" in batch:
+            parts.append(batch["pass1_feats"])
+        x = torch.cat(parts, dim=-1)
+        h = self.backbone(x)
+
+        base = self.base_head(h)
+        tl = batch["temporal_layer"].to(dtype=torch.long)
+        tl0_mask = (tl == 0).unsqueeze(-1).to(dtype=h.dtype)
+        tl0_strength = torch.sigmoid(self.tl0_gate(h))
+        residual = self.tl0_residual(h) * tl0_strength * tl0_mask
+        pred = base + residual
+        return {
+            "pred": pred,
+            "tl0_strength": tl0_strength,
+        }
+
+
 class Phase2Net(nn.Module):
     def __init__(self, self_dim: int, pair_dim: int, meta_dim: int, cfg: dict, pass1_dim: int = 0, out_dim: int = 2):
         super().__init__()

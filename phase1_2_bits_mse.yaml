@@ -1,0 +1,116 @@
+seed: 42
+
+data:
+  labels_csv: "/data/lh/qp_state_predictor/dataset/training.csv"
+  yuv_root: "/mnt/ec-data2/lh_data/vtcoder/yuv"
+  cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_new_cache/"
+  cache_max_open_sequences: 10
+  pair_cache_max_open_sequences: 10
+  y_lowres_cache_suffix: ".ylow.npy"
+  y_lowres_cache_max_open_sequences: 2
+  phase1_tensor_cache_max_open_sequences: 4
+  phase2_tensor_cache_max_open_sequences: 4
+  output_root: "/data/lh/qp_state_predictor/outputs_phase1_2_bits_mse/"
+
+  sequence_col: "sequence"
+  poc_col: "poc"
+  qp_col: "enc_qp"
+  bits_col: "enc_bits"
+  psnr_col: "enc_psnr"
+  mse_col: "enc_mse"
+
+  group_cols: ["sequence"]
+  split_by_col: "sequence"
+
+  yuv_sequence_col: "sequence"
+  yuv_filename_template: "{sequence}.yuv"
+
+  width: 1280
+  height: 720
+  bit_depth: 8
+  resize_width: 192
+  resize_height: 108
+
+  i_interval: 125
+  gop_size: 16
+  tail_hier_min: 4
+  infer_refs_if_missing: false
+
+  explicit_ref_columns:
+    frame_type: null
+    temporal_layer: "level"
+    ref_poc_1: "refpoc0"
+    ref_poc_2: "refpoc1"
+    ref_qp_1: "refqp0"
+    ref_qp_2: "refqp1"
+  intra_period_pos_col: "intra_period_pos"
+
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+
+  qp_norm_min: 30
+  qp_norm_max: 255
+
+  vmaf_col: "pass2_vmaf"
+
+features:
+  block_size: 8
+  entropy_bins: 32
+  edge_threshold: 0.08
+  changed_threshold: 0.03
+  pair_block_size: 8
+  use_pair_cache: true
+  pair_cache_suffix: ".pair.npz"
+  pair_cache_required: false
+  pair_cache_fallback_online: false
+  use_phase1_tensor_cache: true
+  phase1_tensor_cache_required: false
+  use_phase2_tensor_cache: false
+  phase2_tensor_cache_required: false
+
+train:
+  num_workers: 8
+  eval_full_train_each_epoch: false
+  prefetch_factor: 2
+  sequence_grouped_batches: true
+  epochs: 100
+  batch_size_phase1: 512
+  batch_size_phase2: 512
+  batch_size_phase3: 1
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  huber_delta: 0.2
+  grad_clip: 5.0
+  amp: true
+  device: "cuda"
+  save_every: 1
+  ddp_find_unused_parameters: false
+
+loss:
+  bits_weight: 1.0
+  mse_weight: 1.0
+  aux_weight: 0.3
+  bits_linear_weight: 0.25
+  bits_linear_divisor: 16384.0
+  bits_linear_huber_delta: null
+  mse_term: "log_mse"
+  huber_delta_psnr: null
+  huber_delta_psnr_scale: 5.0
+  huber_delta_vmaf: null
+  huber_delta_vmaf_scale: 2.0
+
+model:
+  mode: "single"
+  double_target: "bits"
+  phase1_variant: "phase1_2"
+  phase2_variant: "flat"
+  self_hidden: 128
+  edge_hidden: 128
+  state_hidden: 64
+  head_hidden: 128
+  dropout: 0.1
+  state_dim: 32
+
+eval:
+  max_psnr_value: 255.0
