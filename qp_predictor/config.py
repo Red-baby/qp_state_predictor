@@ -117,6 +117,8 @@ DEFAULT_CONFIG = {
         "bits_linear_weight": 0.25,
         "bits_linear_divisor": 16384.0,
         "bits_linear_huber_delta": None,
+        "phase1_tl_bits_weights": {},
+        "phase1_tl_bits_weights_normalize": True,
         # 第二维失真项：log_mse（默认）| psnr | vmaf（直接回归 VMAF；模型该维输出即为 VMAF）
         "mse_term": "log_mse",
         # mse_term=psnr 时 Huber delta：未设 huber_delta_psnr 时为 train.huber_delta * huber_delta_psnr_scale（默认 5，约对应 dB 量级）

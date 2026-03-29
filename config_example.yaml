@@ -91,6 +91,8 @@ loss:
   bits_linear_weight: 0.25
   bits_linear_divisor: 16384.0
   bits_linear_huber_delta: null
+  phase1_tl_bits_weights: {}
+  phase1_tl_bits_weights_normalize: true
   # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber）| vmaf（直接回归 VMAF）
   # 可选：huber_delta_psnr / huber_delta_vmaf 指定绝对阈值；不设则用对应 scale
   mse_term: "log_mse"
@@ -105,7 +107,7 @@ loss:
 model:
   mode: "single"
   double_target: "bits"
-  phase1_variant: "flat"   # flat | phase1_1 | phase1_2
+  phase1_variant: "flat"   # flat | phase1_1 | phase1_2 | phase1_3
   phase2_variant: "flat"   # flat | phase2_1 | phase2_2
   self_hidden: 128
   edge_hidden: 128

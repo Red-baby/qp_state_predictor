@@ -143,6 +143,10 @@ def phase1_variant(cfg: dict) -> str:
     return str(cfg.get("model", {}).get("phase1_variant", "flat")).lower().strip()
 
 
+def is_phase1_3_variant(cfg: dict) -> bool:
+    return phase1_variant(cfg) == "phase1_3"
+
+
 def _double_mode_dir_suffix(cfg: dict) -> str:
     """double 专用目录后缀：_double_bits | _double_psnr | _double_mse | _double_vmaf"""
     dt = double_target(cfg)
@@ -163,8 +167,8 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     base = f"phase{phase}"
     if phase == 1:
         v = phase1_variant(cfg)
-        if v not in ("flat", "phase1_1", "phase1_2"):
-            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1" 或 "phase1_2"，当前为 {v!r}')
+        if v not in ("flat", "phase1_1", "phase1_2", "phase1_3"):
+            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2" 或 "phase1_3"，当前为 {v!r}')
         if v != "flat":
             base = v
     if phase == 2:
@@ -209,13 +213,13 @@ def build_model(cfg: dict, phase: int):
 
     if phase == 1:
         v = phase1_variant(cfg)
-        if v == "flat":
+        if v in ("flat", "phase1_3"):
             return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_1":
             return Phase1_1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_2":
             return Phase1_2Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
-        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1" 或 "phase1_2"，当前为 {v!r}')
+        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2" 或 "phase1_3"，当前为 {v!r}')
     if phase == 2:
         v = phase2_variant(cfg)
         if v == "flat":
@@ -465,6 +469,48 @@ def _phase2_aux_dist_target(batch: dict, cfg: dict) -> torch.Tensor | None:
     return target[..., 1:2]
 
 
+def _masked_huber_weighted(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    delta: float,
+    sample_weight: torch.Tensor,
+) -> torch.Tensor:
+    mask = mask.float()
+    while mask.dim() < pred.dim():
+        mask = mask.unsqueeze(-1)
+    weight = sample_weight.float()
+    while weight.dim() < pred.dim():
+        weight = weight.unsqueeze(-1)
+    diff = pred - target
+    abs_diff = diff.abs()
+    delta_t = torch.tensor(delta, device=pred.device, dtype=pred.dtype)
+    quadratic = torch.minimum(abs_diff, delta_t)
+    linear = abs_diff - quadratic
+    loss = 0.5 * quadratic ** 2 + delta_t * linear
+    eff = mask * weight
+    denom = eff.sum().clamp_min(1.0) * pred.shape[-1]
+    return (loss * eff).sum() / denom
+
+
+def _phase1_bits_temporal_weights(batch: dict, cfg: dict) -> torch.Tensor:
+    tl = batch["temporal_layer"].to(dtype=torch.long)
+    weight_cfg = cfg.get("loss", {}).get("phase1_tl_bits_weights", {}) or {}
+    default_w = float(weight_cfg.get("default", 1.0))
+    weights = torch.full_like(tl, fill_value=default_w, dtype=torch.float32)
+    for key, val in weight_cfg.items():
+        if str(key).lower() == "default":
+            continue
+        try:
+            tl_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        weights = torch.where(tl == tl_id, torch.full_like(weights, float(val)), weights)
+    if bool(cfg.get("loss", {}).get("phase1_tl_bits_weights_normalize", True)):
+        weights = weights / weights.mean().clamp_min(1e-6)
+    return weights.to(device=batch["target"].device)
+
+
 def compute_loss(batch, outputs, cfg, phase: int):
     delta = float(cfg["train"]["huber_delta"])
     bits_w = float(cfg["loss"]["bits_weight"])
@@ -477,6 +523,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
         target = batch["target"]
         mask = batch["valid_mask"]
         phase2_2 = phase == 2 and is_phase2_2_variant(cfg)
+        phase1_3 = phase == 1 and is_phase1_3_variant(cfg)
         if is_double_mode(cfg):
             if double_target(cfg) == "bits":
                 if phase2_2:
@@ -532,6 +579,16 @@ def compute_loss(batch, outputs, cfg, phase: int):
 
         if phase2_2:
             loss_bits, bits_extra_logs = _phase2_bits_hybrid_loss(pred[..., 0:1], target[..., 0:1], mask, cfg)
+        elif phase1_3:
+            tl_weights = _phase1_bits_temporal_weights(batch, cfg)
+            loss_bits = _masked_huber_weighted(pred[..., 0:1], target[..., 0:1], mask, delta, tl_weights)
+            bits_extra_logs = {
+                "loss_bits_log": float(loss_bits.item()),
+                "loss_bits_linear": 0.0,
+            }
+            weight_cfg = cfg.get("loss", {}).get("phase1_tl_bits_weights", {}) or {}
+            for k, v in weight_cfg.items():
+                bits_extra_logs[f"phase1_tl_weight_{k}"] = float(v)
         else:
             loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
             bits_extra_logs = {
