@@ -1,10 +1,16 @@
 seed: 42
 
 data:
-  labels_csv: "/path/to/frame_labels.csv"
-  yuv_root: "/path/to/yuv_folder"
-  cache_dir: "/path/to/cache"
-  output_root: "/path/to/outputs"
+  labels_csv: "/data/lh/qp_state_predictor/dataset/training.csv"
+  yuv_root: "/mnt/ec-data2/lh_data/vtcoder/yuv"
+  cache_dir: "/data/lh/qp_state_predictor/qp_state_predictor_new_cache/"
+  cache_max_open_sequences: 10
+  pair_cache_max_open_sequences: 10
+  y_lowres_cache_suffix: ".ylow.npy"
+  y_lowres_cache_max_open_sequences: 2
+  phase1_tensor_cache_max_open_sequences: 4
+  phase2_tensor_cache_max_open_sequences: 4
+  output_root: "/data/lh/qp_state_predictor/outputs_phase2_2_bits_vmaf_weighted/"
 
   sequence_col: "sequence"
   poc_col: "poc"
@@ -22,7 +28,6 @@ data:
   width: 1280
   height: 720
   bit_depth: 8
-
   resize_width: 192
   resize_height: 108
 
@@ -44,18 +49,10 @@ data:
   val_ratio: 0.1
   test_ratio: 0.1
 
-  # 当前帧/参考帧 QP 与 pass1_qp 的 min-max 归一化：(x - min) / (max - min)，默认约 30～255
   qp_norm_min: 30
   qp_norm_max: 255
 
-  # loss.mse_term=vmaf 时必填：CSV 中作为监督标签的 VMAF 列，例如 "pass2_vmaf"
-  vmaf_col: null
-
-  # pass1 先验特征默认启用，列名默认读取：
-  #   pass1_qp / pass1_bits / pass1_mse / pass1_psnr / pass1_vmaf
-  pass1_vmaf_norm_div: 100.0
-
-  # 训练输出目录固定为 phase{N}_pass1 + 失真后缀；single 时再追加 _logmse/_psnr/_vmaf，double 时追加 _double_bits/_double_psnr/_double_mse/_double_vmaf
+  vmaf_col: "pass2_vmaf"
 
 features:
   block_size: 8
@@ -63,18 +60,23 @@ features:
   edge_threshold: 0.08
   changed_threshold: 0.03
   pair_block_size: 8
-  # Phase 2/3：先运行 python -m qp_predictor.preprocess_pair_cache --config ... 生成 <seq>.pair.npz 后再设 true
-  use_pair_cache: false
+  use_pair_cache: true
   pair_cache_suffix: ".pair.npz"
   pair_cache_required: false
-  pair_cache_fallback_online: true
+  pair_cache_fallback_online: false
+  use_phase1_tensor_cache: false
+  phase1_tensor_cache_required: false
+  use_phase2_tensor_cache: true
+  phase2_tensor_cache_required: false
 
 train:
-  num_workers: 4
-  epochs: 40
-  batch_size_phase1: 256
-  batch_size_phase2: 256
-  # Phase3：当前实现要求 batch 内 topo_order 完全一致；通用安全配置请设为 1
+  num_workers: 8
+  eval_full_train_each_epoch: false
+  prefetch_factor: 2
+  sequence_grouped_batches: true
+  epochs: 100
+  batch_size_phase1: 512
+  batch_size_phase2: 512
   batch_size_phase3: 1
   lr: 1.0e-3
   weight_decay: 1.0e-5
@@ -83,6 +85,7 @@ train:
   amp: true
   device: "cuda"
   save_every: 1
+  ddp_find_unused_parameters: false
 
 loss:
   bits_weight: 1.0
@@ -98,29 +101,27 @@ loss:
   phase1_bits_value_log_scale: 2.5
   phase1_bits_value_weight_power: 1.0
   phase1_bits_value_weight_max: 2.0
-  vmaf_tl_weights: {}
+  vmaf_tl_weights:
+    0: 1.75
+    1: 1.10
+    default: 1.0
   vmaf_tl_weights_normalize: true
-  vmaf_value_weight_alpha: 0.0
+  vmaf_value_weight_alpha: 0.40
   vmaf_value_weight_center: 92.0
   vmaf_value_weight_scale: 8.0
   vmaf_value_weight_power: 1.0
-  vmaf_value_weight_max: 2.0
-  # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber）| vmaf（直接回归 VMAF）
-  # 可选：huber_delta_psnr / huber_delta_vmaf 指定绝对阈值；不设则用对应 scale
-  mse_term: "log_mse"
+  vmaf_value_weight_max: 1.8
+  mse_term: "vmaf"
   huber_delta_psnr: null
   huber_delta_psnr_scale: 5.0
   huber_delta_vmaf: null
   huber_delta_vmaf_scale: 2.0
 
-# 训练：python -m qp_predictor.train --config ... --phase 1 --model-mode single --mse-term psnr
-# VMAF 例子：python -m qp_predictor.train --config ... --phase 2 --model-mode double --double-target distortion --mse-term vmaf
-# 或环境变量 QP_TRAIN_MODEL_MODE / QP_TRAIN_DOUBLE_TARGET / QP_TRAIN_MSE_TERM
 model:
   mode: "single"
   double_target: "bits"
-  phase1_variant: "flat"   # flat | phase1_1 | phase1_2 | phase1_3 | phase1_4
-  phase2_variant: "flat"   # flat | phase2_1 | phase2_2
+  phase1_variant: "flat"
+  phase2_variant: "phase2_2"
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64

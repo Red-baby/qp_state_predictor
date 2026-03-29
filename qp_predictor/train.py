@@ -147,6 +147,10 @@ def is_phase1_3_variant(cfg: dict) -> bool:
     return phase1_variant(cfg) == "phase1_3"
 
 
+def is_phase1_4_variant(cfg: dict) -> bool:
+    return phase1_variant(cfg) == "phase1_4"
+
+
 def _double_mode_dir_suffix(cfg: dict) -> str:
     """double 专用目录后缀：_double_bits | _double_psnr | _double_mse | _double_vmaf"""
     dt = double_target(cfg)
@@ -167,8 +171,8 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     base = f"phase{phase}"
     if phase == 1:
         v = phase1_variant(cfg)
-        if v not in ("flat", "phase1_1", "phase1_2", "phase1_3"):
-            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2" 或 "phase1_3"，当前为 {v!r}')
+        if v not in ("flat", "phase1_1", "phase1_2", "phase1_3", "phase1_4"):
+            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3" 或 "phase1_4"，当前为 {v!r}')
         if v != "flat":
             base = v
     if phase == 2:
@@ -213,13 +217,13 @@ def build_model(cfg: dict, phase: int):
 
     if phase == 1:
         v = phase1_variant(cfg)
-        if v in ("flat", "phase1_3"):
+        if v in ("flat", "phase1_3", "phase1_4"):
             return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_1":
             return Phase1_1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_2":
             return Phase1_2Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
-        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2" 或 "phase1_3"，当前为 {v!r}')
+        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3" 或 "phase1_4"，当前为 {v!r}')
     if phase == 2:
         v = phase2_variant(cfg)
         if v == "flat":
@@ -414,6 +418,9 @@ def _huber_distortion_term(
     mask: torch.Tensor,
     delta: float,
     cfg: dict,
+    *,
+    batch: dict | None = None,
+    apply_sample_weight: bool = False,
 ) -> torch.Tensor:
     """第二维：log(mse) 空间 Huber，或 MSE→PSNR 后 PSNR 空间 Huber，或直接 VMAF 空间 Huber。"""
     term = mse_term_normalized(cfg)
@@ -429,6 +436,9 @@ def _huber_distortion_term(
         return huber_loss_masked(psnr_p, psnr_t, mask, delta_psnr)
     if term == "vmaf":
         delta_v = _effective_huber_delta_vmaf(cfg)
+        if apply_sample_weight and batch is not None:
+            sample_weights = _vmaf_sample_weights(batch, target_log_mse, cfg)
+            return _masked_huber_weighted(pred_log_mse, target_log_mse, mask, delta_v, sample_weights)
         return huber_loss_masked(pred_log_mse, target_log_mse, mask, delta_v)
     raise ValueError(
         f'loss.mse_term 必须是 "log_mse"、"psnr" 或 "vmaf"，当前为 {cfg["loss"].get("mse_term")!r}'
@@ -511,6 +521,57 @@ def _phase1_bits_temporal_weights(batch: dict, cfg: dict) -> torch.Tensor:
     return weights.to(device=batch["target"].device)
 
 
+def _phase1_bits_sample_weights(batch: dict, cfg: dict) -> torch.Tensor:
+    weights = _phase1_bits_temporal_weights(batch, cfg)
+    loss_cfg = cfg.get("loss", {})
+    alpha = float(loss_cfg.get("phase1_bits_value_weight_alpha", 0.0))
+    if alpha > 0.0:
+        target_log_bits = batch["target"][..., 0].detach()
+        center = float(loss_cfg.get("phase1_bits_value_log_center", 9.5))
+        scale = max(float(loss_cfg.get("phase1_bits_value_log_scale", 2.5)), 1e-6)
+        power = float(loss_cfg.get("phase1_bits_value_weight_power", 1.0))
+        max_boost = max(float(loss_cfg.get("phase1_bits_value_weight_max", 2.0)), 0.0)
+        rel = ((target_log_bits - center) / scale).clamp_min(0.0).pow(power).clamp_max(max_boost)
+        weights = weights * (1.0 + alpha * rel)
+    if bool(loss_cfg.get("phase1_tl_bits_weights_normalize", True)):
+        weights = weights / weights.mean().clamp_min(1e-6)
+    return weights
+
+
+def _vmaf_temporal_weights(batch: dict, cfg: dict, device: torch.device) -> torch.Tensor:
+    tl = batch["temporal_layer"].to(dtype=torch.long)
+    weight_cfg = cfg.get("loss", {}).get("vmaf_tl_weights", {}) or {}
+    default_w = float(weight_cfg.get("default", 1.0))
+    weights = torch.full_like(tl, fill_value=default_w, dtype=torch.float32)
+    for key, val in weight_cfg.items():
+        if str(key).lower() == "default":
+            continue
+        try:
+            tl_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        weights = torch.where(tl == tl_id, torch.full_like(weights, float(val)), weights)
+    if bool(cfg.get("loss", {}).get("vmaf_tl_weights_normalize", True)):
+        weights = weights / weights.mean().clamp_min(1e-6)
+    return weights.to(device=device)
+
+
+def _vmaf_sample_weights(batch: dict, target_vmaf: torch.Tensor, cfg: dict) -> torch.Tensor:
+    weights = _vmaf_temporal_weights(batch, cfg, target_vmaf.device)
+    loss_cfg = cfg.get("loss", {})
+    alpha = float(loss_cfg.get("vmaf_value_weight_alpha", 0.0))
+    if alpha > 0.0:
+        center = float(loss_cfg.get("vmaf_value_weight_center", 92.0))
+        scale = max(float(loss_cfg.get("vmaf_value_weight_scale", 8.0)), 1e-6)
+        power = float(loss_cfg.get("vmaf_value_weight_power", 1.0))
+        max_boost = max(float(loss_cfg.get("vmaf_value_weight_max", 2.0)), 0.0)
+        rel = ((center - target_vmaf.detach().squeeze(-1)) / scale).clamp_min(0.0).pow(power).clamp_max(max_boost)
+        weights = weights * (1.0 + alpha * rel)
+    if bool(loss_cfg.get("vmaf_tl_weights_normalize", True)):
+        weights = weights / weights.mean().clamp_min(1e-6)
+    return weights
+
+
 def compute_loss(batch, outputs, cfg, phase: int):
     delta = float(cfg["train"]["huber_delta"])
     bits_w = float(cfg["loss"]["bits_weight"])
@@ -523,7 +584,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
         target = batch["target"]
         mask = batch["valid_mask"]
         phase2_2 = phase == 2 and is_phase2_2_variant(cfg)
-        phase1_3 = phase == 1 and is_phase1_3_variant(cfg)
+        phase1_weighted_bits = phase == 1 and (is_phase1_3_variant(cfg) or is_phase1_4_variant(cfg))
         if is_double_mode(cfg):
             if double_target(cfg) == "bits":
                 if phase2_2:
@@ -554,7 +615,15 @@ def compute_loss(batch, outputs, cfg, phase: int):
                         else:
                             logs["loss_aux_mse"] = float(aux_dist.item())
                 return loss, logs
-            loss_mse = _huber_distortion_term(pred[..., 0:1], target[..., 1:2], mask, delta, cfg)
+            loss_mse = _huber_distortion_term(
+                pred[..., 0:1],
+                target[..., 1:2],
+                mask,
+                delta,
+                cfg,
+                batch=batch,
+                apply_sample_weight=True,
+            )
             loss = mse_w * loss_mse
             logs = {
                 "loss": float(loss.item()),
@@ -579,9 +648,9 @@ def compute_loss(batch, outputs, cfg, phase: int):
 
         if phase2_2:
             loss_bits, bits_extra_logs = _phase2_bits_hybrid_loss(pred[..., 0:1], target[..., 0:1], mask, cfg)
-        elif phase1_3:
-            tl_weights = _phase1_bits_temporal_weights(batch, cfg)
-            loss_bits = _masked_huber_weighted(pred[..., 0:1], target[..., 0:1], mask, delta, tl_weights)
+        elif phase1_weighted_bits:
+            sample_weights = _phase1_bits_sample_weights(batch, cfg)
+            loss_bits = _masked_huber_weighted(pred[..., 0:1], target[..., 0:1], mask, delta, sample_weights)
             bits_extra_logs = {
                 "loss_bits_log": float(loss_bits.item()),
                 "loss_bits_linear": 0.0,
@@ -589,13 +658,22 @@ def compute_loss(batch, outputs, cfg, phase: int):
             weight_cfg = cfg.get("loss", {}).get("phase1_tl_bits_weights", {}) or {}
             for k, v in weight_cfg.items():
                 bits_extra_logs[f"phase1_tl_weight_{k}"] = float(v)
+            bits_extra_logs["phase1_bits_value_weight_alpha"] = float(cfg.get("loss", {}).get("phase1_bits_value_weight_alpha", 0.0))
         else:
             loss_bits = huber_loss_masked(pred[..., 0:1], target[..., 0:1], mask, delta)
             bits_extra_logs = {
                 "loss_bits_log": float(loss_bits.item()),
                 "loss_bits_linear": 0.0,
             }
-        loss_mse = _huber_distortion_term(pred[..., 1:2], target[..., 1:2], mask, delta, cfg)
+        loss_mse = _huber_distortion_term(
+            pred[..., 1:2],
+            target[..., 1:2],
+            mask,
+            delta,
+            cfg,
+            batch=batch,
+            apply_sample_weight=True,
+        )
         loss = bits_w * loss_bits + mse_w * loss_mse
         logs = {
             "loss": float(loss.item()),
