@@ -189,6 +189,16 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     return f"{base}_pass1{dist_suf}"
 
 
+def should_save_epoch_checkpoint(cfg: dict, epoch: int) -> bool:
+    train_cfg = cfg.get("train", {})
+    if not bool(train_cfg.get("save_epoch_checkpoints", False)):
+        return False
+    save_every = int(train_cfg.get("save_every", 1))
+    if save_every <= 0:
+        return False
+    return epoch % save_every == 0
+
+
 def split_manifest(manifest, cfg):
     split_by_col = cfg["data"]["split_by_col"]
     train_keys, val_keys, test_keys = train_val_test_split(
@@ -1815,6 +1825,11 @@ def main():
                 "config": cfg,
             }
             torch.save(ckpt, output_dir / "last.pt")
+
+            if should_save_epoch_checkpoint(cfg, epoch):
+                epoch_ckpt_dir = output_dir / "checkpoints"
+                ensure_dir(epoch_ckpt_dir)
+                torch.save(ckpt, epoch_ckpt_dir / f"epoch_{epoch:04d}.pt")
 
             if eval_metrics["loss"] < best_eval:
                 best_eval = eval_metrics["loss"]

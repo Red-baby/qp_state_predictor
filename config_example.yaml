@@ -83,6 +83,8 @@ train:
   amp: true
   device: "cuda"
   save_every: 1
+  save_epoch_checkpoints: false
+  eval_full_train_each_epoch: true
 
 loss:
   bits_weight: 1.0

@@ -104,6 +104,7 @@ DEFAULT_CONFIG = {
         "amp": True,
         "device": "cuda",
         "save_every": 1,
+        "save_epoch_checkpoints": False,
         # 每 epoch 是否在训练集上跑完整 eval（与 val 一样扫全数据）；false 可明显省内存/时间，history 中 train 仅保留 opt_loss 占位
         "eval_full_train_each_epoch": True,
         "sequence_grouped_batches": False,
