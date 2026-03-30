@@ -71,7 +71,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _load_checkpoint(checkpoint_path: Path) -> dict:
-    ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+    ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
     if not isinstance(ckpt, dict) or "model_state" not in ckpt:
         raise ValueError(f"checkpoint 格式不正确，缺少 model_state: {checkpoint_path}")
     return ckpt
@@ -122,7 +122,10 @@ def _export_mlp(name: str, module: nn.Module) -> MLPExport:
 
 
 def _fmt_float(v: float) -> str:
-    return format(float(v), ".9g") + "f"
+    text = format(float(v), ".9g")
+    if "e" not in text and "E" not in text and "." not in text:
+        text += ".0"
+    return text + "f"
 
 
 def _flatten_weight(weight: torch.Tensor) -> list[float]:
