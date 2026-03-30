@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
         },
         # pass1 VMAF 输入归一化：pass1_vmaf / pass1_vmaf_norm_div（与 qp 归一化同量级）
         "pass1_vmaf_norm_div": 100.0,
+        "pass1_psnr_norm_div": 100.0,
         "phase1_tensor_cache_max_open_sequences": 4,
         "phase2_tensor_cache_max_open_sequences": 4,
     },
@@ -179,12 +180,14 @@ def normalize_mse_term(term: str) -> str:
     t = str(term).lower().strip()
     if t == "psnr":
         return "psnr"
+    if t in ("psnr_direct", "direct_psnr", "psnrdirect"):
+        return "psnr_direct"
     if t == "vmaf":
         return "vmaf"
     if t in ("log_mse", "logmse", "mse", ""):
         return "log_mse"
     raise ValueError(
-        f'loss.mse_term 必须是 log_mse、mse、logmse、psnr 或 vmaf 之一，当前为 {term!r}'
+        f'loss.mse_term 必须是 log_mse、mse、logmse、psnr、psnr_direct 或 vmaf 之一，当前为 {term!r}'
     )
 
 

@@ -180,6 +180,10 @@ def build_pass1_vector(row: pd.Series, cfg: dict) -> np.ndarray:
         div = float(data_cfg.get("pass1_vmaf_norm_div", 100.0))
         v = float(row["pass1_vmaf"]) / max(div, 1e-6)
         return np.asarray([qp_n, log_bits, v, dqp], dtype=np.float32)
+    if mse_term == "psnr_direct":
+        div = float(data_cfg.get("pass1_psnr_norm_div", 100.0))
+        v = float(row["pass1_psnr"]) / max(div, 1e-6)
+        return np.asarray([qp_n, log_bits, v, dqp], dtype=np.float32)
     return np.asarray([qp_n, log_bits, float(row["pass1_log_mse"]), dqp], dtype=np.float32)
 
 
@@ -205,6 +209,7 @@ def _build_pass1_vector_fast(
     pass1_log_bits: float,
     pass1_delta_qp: float,
     pass1_vmaf: float,
+    pass1_psnr: float,
     pass1_log_mse: float,
     cfg: dict,
 ) -> np.ndarray:
@@ -221,6 +226,10 @@ def _build_pass1_vector_fast(
     if mse_term == "vmaf":
         div = float(data_cfg.get("pass1_vmaf_norm_div", 100.0))
         v = float(pass1_vmaf) / max(div, 1e-6)
+        return np.asarray([qp_n, log_bits, v, dqp], dtype=np.float32)
+    if mse_term == "psnr_direct":
+        div = float(data_cfg.get("pass1_psnr_norm_div", 100.0))
+        v = float(pass1_psnr) / max(div, 1e-6)
         return np.asarray([qp_n, log_bits, v, dqp], dtype=np.float32)
     return np.asarray([qp_n, log_bits, float(pass1_log_mse), dqp], dtype=np.float32)
 
@@ -257,6 +266,7 @@ class FrameDataset(Dataset):
         self._poc_arr = self.df["poc"].to_numpy(dtype=np.int64, copy=True)
         self._qp_arr = self.df["qp"].to_numpy(dtype=np.float32, copy=True)
         self._bits_arr = self.df["bits"].to_numpy(dtype=np.float32, copy=True)
+        self._psnr_arr = self.df["psnr"].to_numpy(dtype=np.float32, copy=True)
         self._mse_arr = self.df["mse"].to_numpy(dtype=np.float32, copy=True)
         self._temporal_layer_arr = self.df["temporal_layer"].to_numpy(dtype=np.int64, copy=True)
         self._valid_train_arr = self.df["valid_train"].to_numpy(dtype=np.float32, copy=True)
@@ -276,6 +286,10 @@ class FrameDataset(Dataset):
             self._pass1_vmaf_arr = self.df["pass1_vmaf"].to_numpy(dtype=np.float32, copy=True)
         else:
             self._pass1_vmaf_arr = np.zeros(len(self.df), dtype=np.float32)
+        if "pass1_psnr" in self.df.columns:
+            self._pass1_psnr_arr = self.df["pass1_psnr"].to_numpy(dtype=np.float32, copy=True)
+        else:
+            self._pass1_psnr_arr = np.zeros(len(self.df), dtype=np.float32)
         if "vmaf" in self.df.columns:
             self._vmaf_arr = self.df["vmaf"].to_numpy(dtype=np.float32, copy=True)
         else:
@@ -395,6 +409,8 @@ class FrameDataset(Dataset):
         if is_double_bits_cfg(self.cfg):
             if self._mse_term == "vmaf":
                 aux_dist_target = np.asarray([float(self._vmaf_arr[idx])], dtype=np.float32)
+            elif self._mse_term == "psnr_direct":
+                aux_dist_target = np.asarray([float(self._psnr_arr[idx])], dtype=np.float32)
             else:
                 aux_dist_target = np.asarray([np.log(float(self._mse_arr[idx]) + 1e-6)], dtype=np.float32)
             out["aux_dist_target"] = torch.from_numpy(aux_dist_target)
@@ -433,6 +449,9 @@ class FrameDataset(Dataset):
         elif self._mse_term == "vmaf":
             target_mse = float(self._vmaf_arr[idx])
             target = np.asarray([target_bits, target_mse], dtype=np.float32)
+        elif self._mse_term == "psnr_direct":
+            target_psnr = float(self._psnr_arr[idx])
+            target = np.asarray([target_bits, target_psnr], dtype=np.float32)
         else:
             target_mse = np.log(float(self._mse_arr[idx]) + 1e-6)
             target = np.asarray([target_bits, target_mse], dtype=np.float32)
@@ -449,6 +468,8 @@ class FrameDataset(Dataset):
         if self.phase == 2 and is_double_bits_cfg(self.cfg):
             if self._mse_term == "vmaf":
                 aux_dist_target = np.asarray([float(self._vmaf_arr[idx])], dtype=np.float32)
+            elif self._mse_term == "psnr_direct":
+                aux_dist_target = np.asarray([float(self._psnr_arr[idx])], dtype=np.float32)
             else:
                 aux_dist_target = np.asarray([np.log(float(self._mse_arr[idx]) + 1e-6)], dtype=np.float32)
             out["aux_dist_target"] = torch.from_numpy(aux_dist_target)
@@ -459,6 +480,7 @@ class FrameDataset(Dataset):
                 pass1_log_bits=float(self._pass1_log_bits_arr[idx]),
                 pass1_delta_qp=float(self._pass1_delta_qp_arr[idx]),
                 pass1_vmaf=float(self._pass1_vmaf_arr[idx]),
+                pass1_psnr=float(self._pass1_psnr_arr[idx]),
                 pass1_log_mse=float(self._pass1_log_mse_arr[idx]),
                 cfg=self.cfg,
             )
@@ -508,6 +530,7 @@ class FrameDataset(Dataset):
                             pass1_log_bits=float(self._pass1_log_bits_arr[ref_row_idx]),
                             pass1_delta_qp=float(self._pass1_delta_qp_arr[ref_row_idx]),
                             pass1_vmaf=float(self._pass1_vmaf_arr[ref_row_idx]),
+                            pass1_psnr=float(self._pass1_psnr_arr[ref_row_idx]),
                             pass1_log_mse=float(self._pass1_log_mse_arr[ref_row_idx]),
                             cfg=self.cfg,
                         )
@@ -606,6 +629,8 @@ class SegmentDataset(Dataset):
             mse_term = str(self.cfg["loss"].get("mse_term", "log_mse")).lower().strip()
             if mse_term == "vmaf":
                 targets[t, 1] = float(row["vmaf"])
+            elif mse_term == "psnr_direct":
+                targets[t, 1] = float(row["psnr"])
             else:
                 targets[t, 1] = np.log(float(row["mse"]) + 1e-6)
             valid_loss_mask[t] = float(row["valid_train"])

@@ -40,6 +40,10 @@ class Phase1Net(nn.Module):
         return {"pred": pred}
 
 
+class Phase1PsnrNet(Phase1Net):
+    """PSNR-direct Phase1：结构复用 Phase1Net，以独立网络名区分 direct-PSNR 监督实验。"""
+
+
 def _zero_last_linear(module: nn.Module) -> None:
     if not hasattr(module, "net"):
         return
@@ -495,6 +499,10 @@ class Phase2_2Net(nn.Module):
             "bits_u_t": bits_out["u_t"],
             "dist_u_t": dist_out["u_t"],
         }
+
+
+class Phase2_3Net(Phase2_2Net):
+    """PSNR-direct Phase2：结构复用 Phase2_2Net，以独立网络名区分 direct-PSNR 监督实验。"""
 
 
 class Phase3Net(nn.Module):

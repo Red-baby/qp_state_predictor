@@ -35,8 +35,9 @@ from .features import (
     self_feature_names,
 )
 from .manifest import build_manifest
-from .models import Phase1Net, Phase1_1Net, Phase1_2Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase3Net
+from .models import Phase1Net, Phase1PsnrNet, Phase1_1Net, Phase1_2Net, Phase2Net, Phase2_1Net, Phase2_2Net, Phase2_3Net, Phase3Net
 from .utils import (
+    compute_mse_from_psnr,
     compute_psnr_from_mse_torch,
     ensure_dir,
     huber_loss_masked,
@@ -81,9 +82,15 @@ def is_vmaf_distortion(cfg: dict) -> bool:
     return mse_term_normalized(cfg) == "vmaf"
 
 
+def is_psnr_direct_distortion(cfg: dict) -> bool:
+    return mse_term_normalized(cfg) == "psnr_direct"
+
+
 def _distortion_loss_dir_suffix(cfg: dict) -> str:
     """由 loss.mse_term 区分输出目录：log_mse → _logmse，psnr → _psnr，vmaf → _vmaf。"""
     term = mse_term_normalized(cfg)
+    if term == "psnr_direct":
+        return "_psnrdirect"
     if term == "psnr":
         return "_psnr"
     if term == "vmaf":
@@ -159,6 +166,8 @@ def _double_mode_dir_suffix(cfg: dict) -> str:
     if dt != "distortion":
         raise ValueError(f'model.double_target 应为 "bits" 或 "distortion"，当前为 {dt!r}')
     term = mse_term_normalized(cfg)
+    if term == "psnr_direct":
+        return "_double_psnrdirect"
     if term == "psnr":
         return "_double_psnr"
     if term == "vmaf":
@@ -171,14 +180,14 @@ def phase_output_dirname(cfg: dict, phase: int) -> str:
     base = f"phase{phase}"
     if phase == 1:
         v = phase1_variant(cfg)
-        if v not in ("flat", "phase1_1", "phase1_2", "phase1_3", "phase1_4"):
-            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3" 或 "phase1_4"，当前为 {v!r}')
+        if v not in ("flat", "phase1_1", "phase1_2", "phase1_3", "phase1_4", "phase1_psnr"):
+            raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3"、"phase1_4" 或 "phase1_psnr"，当前为 {v!r}')
         if v != "flat":
             base = v
     if phase == 2:
         v = phase2_variant(cfg)
-        if v not in ("flat", "phase2_1", "phase2_2"):
-            raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1" 或 "phase2_2"，当前为 {v!r}')
+        if v not in ("flat", "phase2_1", "phase2_2", "phase2_3"):
+            raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1"、"phase2_2" 或 "phase2_3"，当前为 {v!r}')
         if v != "flat":
             base = v
     data_cfg = cfg["data"]
@@ -229,11 +238,13 @@ def build_model(cfg: dict, phase: int):
         v = phase1_variant(cfg)
         if v in ("flat", "phase1_3", "phase1_4"):
             return Phase1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
+        if v == "phase1_psnr":
+            return Phase1PsnrNet(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_1":
             return Phase1_1Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
         if v == "phase1_2":
             return Phase1_2Net(self_dim=self_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, out_dim=head_out)
-        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3" 或 "phase1_4"，当前为 {v!r}')
+        raise ValueError(f'model.phase1_variant 必须为 "flat"、"phase1_1"、"phase1_2"、"phase1_3"、"phase1_4" 或 "phase1_psnr"，当前为 {v!r}')
     if phase == 2:
         v = phase2_variant(cfg)
         if v == "flat":
@@ -263,7 +274,16 @@ def build_model(cfg: dict, phase: int):
                 cfg=cfg,
                 out_dim=head_out,
             )
-        raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1" 或 "phase2_2"，当前为 {v!r}')
+        if v == "phase2_3":
+            return Phase2_3Net(
+                self_dim=self_dim,
+                pair_dim=pair_dim,
+                meta_dim=meta_dim,
+                pass1_dim=pass1_dim,
+                cfg=cfg,
+                out_dim=head_out,
+            )
+        raise ValueError(f'model.phase2_variant 必须为 "flat"、"phase2_1"、"phase2_2" 或 "phase2_3"，当前为 {v!r}')
     if phase == 3:
         return Phase3Net(self_dim=self_dim, pair_dim=pair_dim, meta_dim=meta_dim, pass1_dim=pass1_dim, cfg=cfg, head_out_dim=head_out)
     raise ValueError(f"Unsupported phase: {phase}")
@@ -432,10 +452,13 @@ def _huber_distortion_term(
     batch: dict | None = None,
     apply_sample_weight: bool = False,
 ) -> torch.Tensor:
-    """第二维：log(mse) 空间 Huber，或 MSE→PSNR 后 PSNR 空间 Huber，或直接 VMAF 空间 Huber。"""
+    """第二维：log(mse) / PSNR / direct-PSNR / VMAF 空间 Huber。"""
     term = mse_term_normalized(cfg)
     if term in ("log_mse", "mse", ""):
         return huber_loss_masked(pred_log_mse, target_log_mse, mask, delta)
+    if term == "psnr_direct":
+        delta_psnr = _effective_huber_delta_psnr(cfg)
+        return huber_loss_masked(pred_log_mse, target_log_mse, mask, delta_psnr)
     if term == "psnr":
         max_v = float(cfg["eval"]["max_psnr_value"])
         delta_psnr = _effective_huber_delta_psnr(cfg)
@@ -451,7 +474,7 @@ def _huber_distortion_term(
             return _masked_huber_weighted(pred_log_mse, target_log_mse, mask, delta_v, sample_weights)
         return huber_loss_masked(pred_log_mse, target_log_mse, mask, delta_v)
     raise ValueError(
-        f'loss.mse_term 必须是 "log_mse"、"psnr" 或 "vmaf"，当前为 {cfg["loss"].get("mse_term")!r}'
+        f'loss.mse_term 必须是 "log_mse"、"psnr"、"psnr_direct" 或 "vmaf"，当前为 {cfg["loss"].get("mse_term")!r}'
     )
 
 
@@ -652,7 +675,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
                 logs["distortion_huber_delta"] = _effective_huber_delta_vmaf(cfg)
             else:
                 logs["loss_mse"] = float(loss_mse.item())
-                if mse_term == "psnr":
+                if mse_term in ("psnr", "psnr_direct"):
                     logs["distortion_huber_delta"] = _effective_huber_delta_psnr(cfg)
             return loss, logs
 
@@ -711,7 +734,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
             logs["distortion_huber_delta"] = _effective_huber_delta_vmaf(cfg)
         else:
             logs["loss_mse"] = float(loss_mse.item())
-            if mse_term == "psnr":
+            if mse_term in ("psnr", "psnr_direct"):
                 logs["distortion_huber_delta"] = _effective_huber_delta_psnr(cfg)
         return loss, logs
 
@@ -755,7 +778,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
             else:
                 logs["loss_mse"] = float(loss_mse.item())
                 logs["loss_aux_mse"] = float(loss_aux_mse.item())
-                if mse_term == "psnr":
+                if mse_term in ("psnr", "psnr_direct"):
                     logs["distortion_huber_delta"] = _effective_huber_delta_psnr(cfg)
             return loss, logs
 
@@ -782,7 +805,7 @@ def compute_loss(batch, outputs, cfg, phase: int):
         else:
             logs["loss_mse"] = float(loss_mse.item())
             logs["loss_aux_mse"] = float(loss_aux_mse.item())
-            if mse_term == "psnr":
+            if mse_term in ("psnr", "psnr_direct"):
                 logs["distortion_huber_delta"] = _effective_huber_delta_psnr(cfg)
         return loss, logs
 
@@ -1154,6 +1177,13 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
                 vmaf_true = target[:, 1].detach().cpu().numpy()
                 vmaf_pred_chunks.append(vmaf_pred)
                 vmaf_true_chunks.append(vmaf_true)
+            elif is_psnr_direct_distortion(cfg):
+                psnr_pred = pred[:, 0].detach().cpu().numpy()
+                psnr_true = target[:, 1].detach().cpu().numpy()
+                mse_pred = compute_mse_from_psnr(psnr_pred, max_value=float(cfg["eval"]["max_psnr_value"]))
+                mse_true = compute_mse_from_psnr(psnr_true, max_value=float(cfg["eval"]["max_psnr_value"]))
+                mse_true_all.append(mse_true)
+                mse_pred_all.append(mse_pred)
             else:
                 mse_pred = inverse_log_mse(pred[:, 0]).detach().cpu().numpy()
                 mse_true = inverse_log_mse(target[:, 1]).detach().cpu().numpy()
@@ -1171,6 +1201,13 @@ def evaluate_loader(model, loader, device, cfg, phase: int, *, rank: int = 0):
                 vmaf_true = target[:, 1].detach().cpu().numpy()
                 vmaf_pred_chunks.append(vmaf_pred)
                 vmaf_true_chunks.append(vmaf_true)
+            elif is_psnr_direct_distortion(cfg):
+                psnr_pred = pred[:, 1].detach().cpu().numpy()
+                psnr_true = target[:, 1].detach().cpu().numpy()
+                mse_pred = compute_mse_from_psnr(psnr_pred, max_value=float(cfg["eval"]["max_psnr_value"]))
+                mse_true = compute_mse_from_psnr(psnr_true, max_value=float(cfg["eval"]["max_psnr_value"]))
+                mse_true_all.append(mse_true)
+                mse_pred_all.append(mse_pred)
             else:
                 mse_pred = inverse_log_mse(pred[:, 1]).detach().cpu().numpy()
                 mse_true = inverse_log_mse(target[:, 1]).detach().cpu().numpy()

@@ -54,6 +54,7 @@ data:
   # pass1 先验特征默认启用，列名默认读取：
   #   pass1_qp / pass1_bits / pass1_mse / pass1_psnr / pass1_vmaf
   pass1_vmaf_norm_div: 100.0
+  pass1_psnr_norm_div: 100.0
 
   # 训练输出目录固定为 phase{N}_pass1 + 失真后缀；single 时再追加 _logmse/_psnr/_vmaf，double 时追加 _double_bits/_double_psnr/_double_mse/_double_vmaf
 
@@ -107,7 +108,11 @@ loss:
   vmaf_value_weight_scale: 8.0
   vmaf_value_weight_power: 1.0
   vmaf_value_weight_max: 2.0
-  # 失真第二项：log_mse（默认）| psnr（dB 空间 Huber）| vmaf（直接回归 VMAF）
+  # 失真第二项：
+  #   log_mse     : 预测 log(mse)
+  #   psnr        : 内部仍预测 log(mse)，只在 PSNR 空间算 loss
+  #   psnr_direct : 直接监督 CSV 的 psnr_col，并直接预测 PSNR
+  #   vmaf        : 直接回归 VMAF
   # 可选：huber_delta_psnr / huber_delta_vmaf 指定绝对阈值；不设则用对应 scale
   mse_term: "log_mse"
   huber_delta_psnr: null
@@ -121,8 +126,8 @@ loss:
 model:
   mode: "single"
   double_target: "bits"
-  phase1_variant: "flat"   # flat | phase1_1 | phase1_2 | phase1_3 | phase1_4
-  phase2_variant: "flat"   # flat | phase2_1 | phase2_2
+  phase1_variant: "flat"   # flat | phase1_1 | phase1_2 | phase1_3 | phase1_4 | phase1_psnr
+  phase2_variant: "flat"   # flat | phase2_1 | phase2_2 | phase2_3
   self_hidden: 128
   edge_hidden: 128
   state_hidden: 64

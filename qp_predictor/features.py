@@ -414,6 +414,13 @@ def pass1_feature_names(cfg: Optional[dict] = None) -> List[str]:
                 "pass1_vmaf_norm",
                 "delta_qp_from_pass1",
             ]
+        if term == "psnr_direct":
+            return [
+                "pass1_qp_norm",
+                "pass1_log_bits",
+                "pass1_psnr_norm",
+                "delta_qp_from_pass1",
+            ]
     return [
         "pass1_qp_norm",
         "pass1_log_bits",

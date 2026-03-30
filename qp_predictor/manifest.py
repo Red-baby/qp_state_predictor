@@ -202,6 +202,13 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
             raise ValueError(
                 f"当前实现默认使用 pass1 特征；loss.mse_term=vmaf 时，CSV 必须包含 pass1 列 {missing}。"
             )
+    elif mse_term == "psnr_direct":
+        needed = [p1_qp_col, p1_bits_col, p1_psnr_col]
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"当前实现默认使用 pass1 特征；loss.mse_term=psnr_direct 时，CSV 必须包含 pass1 列 {missing}。"
+            )
     else:
         needed = [p1_qp_col, p1_bits_col, p1_mse_col]
         missing = [c for c in needed if c not in df.columns]
@@ -216,6 +223,15 @@ def build_manifest(cfg: dict) -> pd.DataFrame:
             df["pass1_mse"] = df[p1_mse_col].astype(float)
         else:
             df["pass1_mse"] = 0.0
+    elif mse_term == "psnr_direct":
+        df["pass1_psnr"] = df[p1_psnr_col].astype(float)
+        if p1_mse_col in df.columns:
+            df["pass1_mse"] = df[p1_mse_col].astype(float)
+        else:
+            max_v = float(cfg.get("eval", {}).get("max_psnr_value", 255.0))
+            df["pass1_mse"] = ((max_v ** 2) / np.power(10.0, df["pass1_psnr"].values.astype(np.float64) / 10.0)).astype(np.float32)
+        if p1_vmaf_col in df.columns:
+            df["pass1_vmaf"] = df[p1_vmaf_col].astype(float)
     else:
         df["pass1_mse"] = df[p1_mse_col].astype(float)
         if p1_vmaf_col in df.columns:

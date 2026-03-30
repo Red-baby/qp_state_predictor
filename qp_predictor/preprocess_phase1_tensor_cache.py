@@ -103,7 +103,12 @@ def _process_sequence_cache(job: dict) -> str:
             qp[poc, 0] = normalize_qp(float(row["qp"]), data_cfg)
             target[poc, 0] = np.log1p(float(row["bits"]))
             if not pure_bits:
-                target[poc, 1] = float(row["vmaf"]) if mse_term == "vmaf" else np.log(float(row["mse"]) + 1e-6)
+                if mse_term == "vmaf":
+                    target[poc, 1] = float(row["vmaf"])
+                elif mse_term == "psnr_direct":
+                    target[poc, 1] = float(row["psnr"])
+                else:
+                    target[poc, 1] = np.log(float(row["mse"]) + 1e-6)
             temporal_layer[poc] = int(row["temporal_layer"])
             valid_mask[poc] = float(row["valid_train"])
             pass1_feats[poc] = _build_pass1_vector_fast(
@@ -111,6 +116,7 @@ def _process_sequence_cache(job: dict) -> str:
                 pass1_log_bits=float(row["pass1_log_bits"]),
                 pass1_delta_qp=float(row["pass1_delta_qp"]),
                 pass1_vmaf=float(row.get("pass1_vmaf", 0.0)),
+                pass1_psnr=float(row.get("pass1_psnr", 0.0)),
                 pass1_log_mse=float(row["pass1_log_mse"]),
                 cfg=cfg_j,
             )

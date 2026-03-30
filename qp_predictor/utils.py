@@ -160,6 +160,15 @@ def compute_psnr_from_mse_torch(mse: torch.Tensor, max_value: float = 255.0) -> 
     return 10.0 * torch.log10((max_value ** 2) / mse)
 
 
+def compute_mse_from_psnr(psnr, max_value: float = 255.0):
+    psnr = np.asarray(psnr)
+    return (max_value ** 2) / np.power(10.0, psnr / 10.0)
+
+
+def compute_mse_from_psnr_torch(psnr: torch.Tensor, max_value: float = 255.0) -> torch.Tensor:
+    return (max_value ** 2) / torch.pow(torch.tensor(10.0, device=psnr.device, dtype=psnr.dtype), psnr / 10.0)
+
+
 def inverse_log_bits(x):
     if isinstance(x, torch.Tensor):
         return torch.exp(x) - 1.0
